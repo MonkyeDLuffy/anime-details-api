@@ -8,6 +8,7 @@ const PORT = 5000;
 app.use(cors());
 app.use(express.json());
 
+
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
@@ -43,7 +44,7 @@ function normalizeAnime(media) {
 const cache = new Map();
 
 const CACHE_TTL = {
-  HOME: 30 * 60 * 1000,        // 30 minutes
+  HOME: 5 * 60 * 1000,        // 5 minutes
   ANIME: 24 * 60 * 60 * 1000,  // 24 hours
   EPISODES: 10 * 60 * 1000,    // 10 minutes
   SEARCH: 60 * 60 * 1000,      // 1 hour
@@ -161,11 +162,12 @@ app.get("/api/home", async (req, res) => {
     const data = await getOrSetCache("home", CACHE_TTL.HOME, async () => {
       console.log("📡 Fetching home data...");
 
-      const [trending, popular, airing, upcoming] = await Promise.all([
+      const [trending, popular, airing, upcoming, latestEpisodes] = await Promise.all([
         getList("TRENDING_DESC"),
         getList("POPULARITY_DESC"),
         getList("POPULARITY_DESC", "", { status: "RELEASING" }),
         getList("POPULARITY_DESC", "", { status: "NOT_YET_RELEASED" }),
+        getList("UPDATED_AT_DESC"),
       ]);
 
       const results = {
@@ -188,6 +190,8 @@ app.get("/api/home", async (req, res) => {
         top_upcoming: upcoming,
         recentlyAdded: popular,
         recently_added: popular,
+        latestEpisodes: latestEpisodes,
+        latest_episodes: latestEpisodes,
         genres: [
           "Action",
           "Adventure",
@@ -207,6 +211,10 @@ app.get("/api/home", async (req, res) => {
         ...results,
       };
     });
+
+    if (!results.spotlights?.length || !results.latestEpisode?.length) {
+  throw new Error("Home data is empty, refusing to return broken response");
+}
 
     res.json(data);
   } catch (error) {
