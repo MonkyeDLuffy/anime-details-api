@@ -162,7 +162,7 @@ app.get("/api/home", async (req, res) => {
     const data = await getOrSetCache("home", CACHE_TTL.HOME, async () => {
       console.log("📡 Fetching home data...");
 
-      const [trending, popular, airing, upcoming, latestEpisodes] = await Promise.all([
+      const results = await Promise.allSettled([
         getList("TRENDING_DESC"),
         getList("POPULARITY_DESC"),
         getList("POPULARITY_DESC", "", { status: "RELEASING" }),
@@ -170,28 +170,44 @@ app.get("/api/home", async (req, res) => {
         getList("UPDATED_AT_DESC"),
       ]);
 
-      const results = {
+      const trending = results[0].status === "fulfilled" ? results[0].value : [];
+      const popular = results[1].status === "fulfilled" ? results[1].value : [];
+      const airing = results[2].status === "fulfilled" ? results[2].value : [];
+      const upcoming = results[3].status === "fulfilled" ? results[3].value : [];
+      const latestEpisodes = results[4].status === "fulfilled" ? results[4].value : [];
+
+      const finalData = {
         spotlights: trending.slice(0, 8),
+
         trending,
+
         topTen: popular.slice(0, 10),
         topten: popular.slice(0, 10),
+
         today: airing,
+        todaySchedule: airing,
+
         topAiring: airing,
         top_airing: airing,
+
         mostPopular: popular,
         most_popular: popular,
+
         mostFavorite: trending,
         most_favorite: trending,
+
         latestCompleted: popular,
         latest_completed: popular,
-        latestEpisode: airing,
-        latest_episode: airing,
+
+        latestEpisode: latestEpisodes.length ? latestEpisodes : airing,
+        latest_episode: latestEpisodes.length ? latestEpisodes : airing,
+
         topUpcoming: upcoming,
         top_upcoming: upcoming,
-        recentlyAdded: popular,
-        recently_added: popular,
-        latestEpisodes: latestEpisodes,
-        latest_episodes: latestEpisodes,
+
+        recentlyAdded: latestEpisodes.length ? latestEpisodes : popular,
+        recently_added: latestEpisodes.length ? latestEpisodes : popular,
+
         genres: [
           "Action",
           "Adventure",
@@ -207,21 +223,26 @@ app.get("/api/home", async (req, res) => {
 
       return {
         status: "ok",
-        results,
-        ...results,
+        results: finalData,
+        ...finalData,
       };
     });
-
-    if (!results.spotlights?.length || !results.latestEpisode?.length) {
-  throw new Error("Home data is empty, refusing to return broken response");
-}
 
     res.json(data);
   } catch (error) {
     console.error("Home error:", error.message);
+
     res.status(500).json({
       status: "error",
-      results: null,
+      results: {
+        spotlights: [],
+        trending: [],
+        latestEpisode: [],
+        latest_episode: [],
+        topTen: [],
+        topten: [],
+        genres: [],
+      },
     });
   }
 });
