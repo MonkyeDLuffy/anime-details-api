@@ -303,19 +303,29 @@ app.get("/api/home", async (req, res) => {
 
     console.log("❌ FETCHING FRESH HOME");
 
+    const safeFilter = `
+      isAdult: false,
+      genre_not_in: ["Hentai", "Ecchi"]
+    `;
+
     const query = `
       query {
-        trending: Page(page: 1, perPage: 10) {
-          media(sort: TRENDING_DESC, type: ANIME) {
+        trending: Page(page: 1, perPage: 12) {
+          media(
+            sort: TRENDING_DESC,
+            type: ANIME,
+            ${safeFilter}
+          ) {
             ${MEDIA_FIELDS}
           }
         }
 
-        latest: Page(page: 1, perPage: 12) {
+        latest: Page(page: 1, perPage: 18) {
           media(
             sort: UPDATED_AT_DESC,
             type: ANIME,
-            status_in: [RELEASING]
+            status_in: [RELEASING],
+            ${safeFilter}
           ) {
             ${MEDIA_FIELDS}
           }
@@ -326,7 +336,29 @@ app.get("/api/home", async (req, res) => {
             sort: SCORE_DESC,
             type: ANIME,
             status: RELEASING,
-            format_in: [TV, ONA]
+            format_in: [TV, ONA],
+            ${safeFilter}
+          ) {
+            ${MEDIA_FIELDS}
+          }
+        }
+
+        mostFavorite: Page(page: 1, perPage: 12) {
+          media(
+            sort: FAVOURITES_DESC,
+            type: ANIME,
+            ${safeFilter}
+          ) {
+            ${MEDIA_FIELDS}
+          }
+        }
+
+        latestCompleted: Page(page: 1, perPage: 12) {
+          media(
+            sort: END_DATE_DESC,
+            type: ANIME,
+            status: FINISHED,
+            ${safeFilter}
           ) {
             ${MEDIA_FIELDS}
           }
@@ -350,6 +382,12 @@ app.get("/api/home", async (req, res) => {
         .map(normalizeAnime),
 
       top_airing: result.topAiring.media
+        .map(normalizeAnime),
+
+      most_favorite: result.mostFavorite.media
+        .map(normalizeAnime),
+
+      latest_completed: result.latestCompleted.media
         .map(normalizeAnime),
     };
 
