@@ -1,6 +1,14 @@
 import express from "express";
 import cors from "cors";
 import axios from "axios";
+import dotenv from "dotenv";
+dotenv.config();
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 const app = express();
 const PORT = 5000;
@@ -44,13 +52,13 @@ function normalizeAnime(media) {
 const cache = new Map();
 
 const CACHE_TTL = {
- DETAILS: 24 * 60 * 60 * 1000,
+ DETAILS: 30 * 60 * 60 * 1000,
 RECOMMENDATIONS: 24 * 60 * 60 * 1000,
 CHARACTERS: 24 * 60 * 60 * 1000,
 SEASONS: 24 * 60 * 60 * 1000,
 SEARCH: 6 * 60 * 60 * 1000,
-EPISODES: 6 * 60 * 60 * 1000,
-HOME: 30 * 60 * 1000,
+EPISODES: 30 * 60 * 60 * 1000,
+HOME: 10 * 60 * 1000,
 };
 
 async function getOrSetCache(key, ttl, fetchFunction) {
@@ -85,6 +93,31 @@ async function getOrSetCache(key, ttl, fetchFunction) {
 
     throw error;
   }
+}
+
+async function getDbCache(table, keyColumn, keyValue, maxAgeMs) {
+  const { data, error } = await supabase
+    .from(table)
+    .select("data, updated_at")
+    .eq(keyColumn, keyValue)
+    .single();
+
+  if (error || !data) return null;
+
+  const age = Date.now() - new Date(data.updated_at).getTime();
+
+  return {
+    data: data.data,
+    fresh: age < maxAgeMs,
+  };
+}
+
+async function setDbCache(table, keyColumn, keyValue, value) {
+  await supabase.from(table).upsert({
+    [keyColumn]: keyValue,
+    data: value,
+    updated_at: new Date().toISOString(),
+  });
 }
 
 const pendingRequests = new Map();
@@ -223,58 +256,91 @@ app.get("/", (req, res) => {
 
 app.get("/api/home", async (req, res) => {
   try {
-    const data = await getOrSetCache(
-      "home",
-      CACHE_TTL.HOME,
-      async () => {
 
-        console.log("Fetching fresh home data...");
-
-        const query = `
-          query {
-            trending: Page(page: 1, perPage: 10) {
-              media(sort: TRENDING_DESC, type: ANIME) {
-                ${MEDIA_FIELDS}
-              }
-            }
-
-            popular: Page(page: 1, perPage: 12) {
-              media(sort: POPULARITY_DESC, type: ANIME) {
-                ${MEDIA_FIELDS}
-              }
-            }
-
-            latest: Page(page: 1, perPage: 12) {
-              media(sort: UPDATED_AT_DESC, type: ANIME) {
-                ${MEDIA_FIELDS}
-              }
-            }
-          }
-        `;
-
-        const result = await anilist(query);
-
-        return {
-          status: "ok",
-
-          spotlight: result.trending.media
-            .slice(0, 6)
-            .map(normalizeAnime),
-
-          trending: result.trending.media.map(normalizeAnime),
-
-          latest_episode: result.latest.media.map(normalizeAnime),
-
-          top_airing: result.popular.media.map(normalizeAnime),
-        };
-      }
+    const cached = await getSupabaseCache(
+      "home_cache",
+      "key",
+      "main",
+      10 * 60 * 1000
     );
 
-    res.json(data);
+    if (cached?.fresh) {
+      console.log("SUPABASE HOME CACHE HIT");
+      return res.json(cached.data);
+    }
+
+    console.log("FETCHING FRESH HOME");
+
+    const query = `
+      query {
+
+        trending: Page(page: 1, perPage: 10) {
+          media(sort: TRENDING_DESC, type: ANIME) {
+            ${MEDIA_FIELDS}
+          }
+        }
+
+        popular: Page(page: 1, perPage: 12) {
+          media(sort: POPULARITY_DESC, type: ANIME) {
+            ${MEDIA_FIELDS}
+          }
+        }
+
+        latest: Page(page: 1, perPage: 12) {
+          media(sort: UPDATED_AT_DESC, type: ANIME) {
+            ${MEDIA_FIELDS}
+          }
+        }
+
+      }
+    `;
+
+    const result = await anilist(query);
+
+    const response = {
+      status: "ok",
+
+      spotlight:
+        result.trending.media
+          .slice(0, 6)
+          .map(normalizeAnime),
+
+      trending:
+        result.trending.media
+          .map(normalizeAnime),
+
+      latest_episode:
+        result.latest.media
+          .map(normalizeAnime),
+
+      top_airing:
+        result.popular.media
+          .map(normalizeAnime),
+    };
+
+    await setSupabaseCache(
+      "home_cache",
+      "key",
+      "main",
+      response
+    );
+
+    res.json(response);
 
   } catch (err) {
 
-    console.error("Home error:", err.message);
+    console.error(err.message);
+
+    const fallback = await getSupabaseCache(
+      "home_cache",
+      "key",
+      "main",
+      999999999999
+    );
+
+    if (fallback?.data) {
+      return res.json(fallback.data);
+    }
 
     res.status(500).json({
       status: "error",
@@ -284,368 +350,577 @@ app.get("/api/home", async (req, res) => {
 });
 
 app.get("/api/details/:id", async (req, res) => {
-  try {
-    const id = Number(req.params.id);
 
-    const anime = await getOrSetCache(
-      `details:${id}`,
-      CACHE_TTL.DETAILS,
-      async () => {
-        const query = `
-          query {
-            Media(id: ${id}, type: ANIME) {
-              ${MEDIA_FIELDS}
-              idMal
-              popularity
-              favourites
-              studios {
-                nodes {
-                  name
-                }
-              }
+  const id = Number(req.params.id);
+
+  try {
+
+    const cached = await getSupabaseCache(
+      "anime_details",
+      "id",
+      id,
+      30 * 60 * 60 * 1000
+    );
+
+    if (cached?.fresh) {
+      console.log("DETAILS CACHE HIT:", id);
+      return res.json(cached.data);
+    }
+
+    const query = `
+      query {
+        Media(id: ${id}, type: ANIME) {
+          ${MEDIA_FIELDS}
+
+          idMal
+          popularity
+          favourites
+
+          studios {
+            nodes {
+              name
             }
           }
-        `;
-
-        const data = await anilist(query);
-        const media = data?.Media;
-
-        if (!media) {
-          throw new Error("No anime details found");
         }
-
-        const normalized = normalizeAnime(media);
-
-        normalized.studios = media.studios?.nodes?.map((s) => s.name) || [];
-        normalized.popularity = media.popularity || 0;
-        normalized.favorites = media.favourites || 0;
-
-        return normalized;
       }
+    `;
+
+    const data = await anilist(query);
+
+    const media = data.Media;
+
+    const anime = normalizeAnime(media);
+
+    anime.studios =
+      media.studios?.nodes?.map((s) => s.name) || [];
+
+    anime.popularity =
+      media.popularity || 0;
+
+    anime.favorites =
+      media.favourites || 0;
+
+    await setSupabaseCache(
+      "anime_details",
+      "id",
+      id,
+      anime
     );
 
     res.json(anime);
+
   } catch (err) {
-    console.error("Details error:", err.message);
+
+    console.error(err.message);
+
+    const fallback = await getSupabaseCache(
+      "anime_details",
+      "id",
+      id,
+      999999999999
+    );
+
+    if (fallback?.data) {
+      return res.json(fallback.data);
+    }
 
     res.status(500).json({
-      id: Number(req.params.id),
       title: "Anime",
-      poster: "",
-      image: "",
-      banner: "",
-      description: "No description available.",
-      genres: [],
-      episodes: 0,
-      status: "",
-      type: "TV",
-      studios: [],
-      popularity: 0,
-      favorites: 0,
     });
   }
 });
 
 app.get("/api/episodes/:id", async (req, res) => {
+  const id = Number(req.params.id);
+
   try {
-    const { id } = req.params;
 
-    const result = await getOrSetCache(
-      `episodes:${id}`,
-      CACHE_TTL.EPISODES,
-      async () => {
-        const query = `
-          query ($id: Int) {
-            Media(id: $id, type: ANIME) {
-              id
-              episodes
-              status
-              nextAiringEpisode {
-                episode
-              }
-              title {
-                romaji
-                english
-              }
-              coverImage {
-                medium
-                large
-              }
-            }
-          }
-        `;
-
-        const data = await anilist(query, { id: Number(id) });
-        const anime = data.Media;
-
-        if (!anime) {
-          return {
-            status: "error",
-            results: [],
-          };
-        }
-
-        let totalEpisodes = 0;
-
-        // ✅ Ongoing anime
-        if (anime.status === "RELEASING" && anime.nextAiringEpisode?.episode) {
-          totalEpisodes = anime.nextAiringEpisode.episode - 1;
-        }
-        // ✅ Finished anime
-        else if (anime.episodes) {
-          totalEpisodes = anime.episodes;
-        }
-        // ✅ fallback
-        else {
-          totalEpisodes = 0;
-        }
-
-        const title =
-          anime.title.english ||
-          anime.title.romaji ||
-          "Anime";
-
-        const image =
-          anime.coverImage?.medium ||
-          anime.coverImage?.large ||
-          "";
-
-        const episodes = Array.from({ length: totalEpisodes }, (_, index) => {
-          const ep = index + 1;
-
-          return {
-            id: `${anime.id}-${ep}`,
-            episodeId: ep,
-            number: ep,
-            episode_no: ep,
-            episode: ep,
-            title: `Episode ${ep}`,
-            name: `Episode ${ep}`,
-            image,
-            snapshot: image,
-            url: `/watch/${anime.id}?ep=${ep}`,
-          };
-        });
-
-        return {
-          status: "ok",
-          results: episodes,
-        };
-      }
+    const cached = await getSupabaseCache(
+      "anime_episodes",
+      "id",
+      id,
+      6 * 60 * 60 * 1000
     );
 
-    res.json(result);
-
-  } catch (error) {
-    console.error("Episodes error:", error);
-    res.status(500).json({
-      status: "error",
-      results: [],
-    });
-  }
-});
-
-app.get("/api/character/list/:id", async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const page = Number(req.query.page || 1);
-
-    const query = `
-      query ($id: Int, $page: Int) {
-        Media(id: $id, type: ANIME) {
-          characters(page: $page, perPage: 12, sort: ROLE) {
-            edges {
-              role
-              node {
-                id
-                name {
-                  full
-                }
-                image {
-                  large
-                }
-              }
-              voiceActors(language: JAPANESE, sort: RELEVANCE) {
-                id
-                name {
-                  full
-                }
-                image {
-                  large
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    const data = await anilist(query, { id, page });
-
-    const results =
-      data.Media.characters.edges.map((edge) => ({
-        role: edge.role,
-        character: {
-          id: edge.node.id,
-          name: edge.node.name.full,
-          image: edge.node.image.large,
-        },
-        voiceActors: edge.voiceActors.map((va) => ({
-          id: va.id,
-          name: va.name.full,
-          image: va.image.large,
-        })),
-      })) || [];
-
-    res.json({
-      status: "ok",
-      results,
-    });
-  } catch (err) {
-    console.error("Character error:", err.message);
-    res.status(500).json({
-      error: "Character fetch failed",
-      debug: err.message,
-    });
-  }
-});
-
-app.get("/api/recommendations/:id", async (req, res) => {
-  try {
-    const id = Number(req.params.id);
+    if (cached?.fresh) {
+      console.log("EPISODES CACHE HIT:", id);
+      return res.json(cached.data);
+    }
 
     const query = `
       query ($id: Int) {
         Media(id: $id, type: ANIME) {
-          recommendations(page: 1, perPage: 12, sort: RATING_DESC) {
-            nodes {
-              mediaRecommendation {
-                ${MEDIA_FIELDS}
-              }
-            }
+          id
+          episodes
+          status
+
+          nextAiringEpisode {
+            episode
           }
-        }
-      }
-    `;
 
-    const data = await anilist(query, { id });
-
-    const results =
-      data.Media.recommendations.nodes
-        .map((node) => node.mediaRecommendation)
-        .filter(Boolean)
-        .map(normalizeAnime) || [];
-
-    res.json({
-      status: "ok",
-      results,
-    });
-  } catch (err) {
-    console.error("Recommendations error:", err.message);
-    res.status(500).json({
-      error: "Recommendations failed",
-      debug: err.message,
-    });
-  }
-});
-
-app.get("/api/search", async (req, res) => {
-  try {
-    const keyword = req.query.query || req.query.q || req.query.keyword;
-    const page = Number(req.query.page || 1);
-
-    if (!keyword) {
-      return res.json({
-        status: "ok",
-        results: [],
-      });
-    }
-
-    const query = `
-      query ($search: String, $page: Int) {
-        Page(page: $page, perPage: 24) {
-          pageInfo {
-            total
-            currentPage
-            lastPage
-            hasNextPage
+          title {
+            romaji
+            english
           }
-          media(search: $search, type: ANIME, sort: POPULARITY_DESC) {
-            ${MEDIA_FIELDS}
+
+          coverImage {
+            medium
+            large
           }
         }
       }
     `;
 
     const data = await anilist(query, {
-      search: keyword,
-      page,
+      id,
     });
 
-    const results = data.Page.media.map(normalizeAnime);
+    const anime = data.Media;
+
+    let totalEpisodes = 0;
+
+    if (
+      anime.status === "RELEASING" &&
+      anime.nextAiringEpisode?.episode
+    ) {
+      totalEpisodes =
+        anime.nextAiringEpisode.episode - 1;
+    }
+
+    else if (anime.episodes) {
+      totalEpisodes = anime.episodes;
+    }
+
+    const image =
+      anime.coverImage?.large ||
+      anime.coverImage?.medium ||
+      "";
+
+    const episodes = Array.from(
+      { length: totalEpisodes },
+      (_, index) => {
+        const ep = index + 1;
+
+        return {
+          id: `${anime.id}-${ep}`,
+          number: ep,
+          episodeId: ep,
+          title: `Episode ${ep}`,
+          image,
+          url: `/watch/${anime.id}?ep=${ep}`,
+        };
+      }
+    );
+
+    const response = {
+      status: "ok",
+      results: episodes,
+    };
+
+    await setSupabaseCache(
+      "anime_episodes",
+      "id",
+      id,
+      response
+    );
+
+    res.json(response);
+
+  } catch (err) {
+
+    console.error(err.message);
+
+    const fallback = await getSupabaseCache(
+      "anime_episodes",
+      "id",
+      id,
+      999999999999
+    );
+
+    if (fallback?.data) {
+      return res.json(fallback.data);
+    }
 
     res.json({
       status: "ok",
-      results,
-      paginationInfo: data.Page.pageInfo,
+      results: [],
     });
+  }
+});
+
+app.get("/api/characters/:id", async (req, res) => {
+
+  const id = Number(req.params.id);
+
+  try {
+
+    const cached = await getSupabaseCache(
+      "anime_characters",
+      "id",
+      id,
+      24 * 60 * 60 * 1000
+    );
+
+    if (cached?.fresh) {
+      return res.json(cached.data);
+    }
+
+    const query = `
+      query {
+        Media(id: ${id}, type: ANIME) {
+
+          characters(page: 1, perPage: 20) {
+
+            edges {
+
+              role
+
+              node {
+                id
+                fullName: name {
+                  full
+                }
+
+                image {
+                  large
+                }
+              }
+
+              voiceActors(language: JAPANESE) {
+                id
+
+                name {
+                  full
+                }
+
+                image {
+                  large
+                }
+              }
+
+            }
+
+          }
+
+        }
+      }
+    `;
+
+    const data = await anilist(query);
+
+    const results =
+      data.Media.characters.edges.map(
+        (edge) => ({
+          role: edge.role,
+
+          character: {
+            id: edge.node.id,
+            name: edge.node.fullName,
+            image: edge.node.image?.large,
+          },
+
+          voiceActor: edge.voiceActors?.[0]
+            ? {
+                id: edge.voiceActors[0].id,
+                name:
+                  edge.voiceActors[0].name.full,
+                image:
+                  edge.voiceActors[0].image
+                    ?.large,
+              }
+            : null,
+        })
+      );
+
+    const response = {
+      status: "ok",
+      results,
+    };
+
+    await setSupabaseCache(
+      "anime_characters",
+      "id",
+      id,
+      response
+    );
+
+    res.json(response);
+
   } catch (err) {
-    console.error("Search error:", err.message);
-    res.status(500).json({
-      error: "Search failed",
-      debug: err.message,
+
+    console.error(err.message);
+
+    const fallback = await getSupabaseCache(
+      "anime_characters",
+      "id",
+      id,
+      999999999999
+    );
+
+    if (fallback?.data) {
+      return res.json(fallback.data);
+    }
+
+    res.json({
+      status: "ok",
+      results: [],
+    });
+  }
+});
+
+app.get("/api/recommendations/:id", async (req, res) => {
+
+  const id = Number(req.params.id);
+
+  try {
+
+    const cached = await getSupabaseCache(
+      "anime_recommendations",
+      "id",
+      id,
+      24 * 60 * 60 * 1000
+    );
+
+    if (cached?.fresh) {
+      return res.json(cached.data);
+    }
+
+    const query = `
+      query {
+        Media(id: ${id}, type: ANIME) {
+
+          recommendations(page: 1, perPage: 12) {
+            nodes {
+
+              mediaRecommendation {
+                ${MEDIA_FIELDS}
+              }
+
+            }
+          }
+
+        }
+      }
+    `;
+
+    const data = await anilist(query);
+
+    const results =
+      data.Media.recommendations.nodes
+        .map((item) =>
+          normalizeAnime(
+            item.mediaRecommendation
+          )
+        )
+        .filter(Boolean);
+
+    const response = {
+      status: "ok",
+      results,
+    };
+
+    await setSupabaseCache(
+      "anime_recommendations",
+      "id",
+      id,
+      response
+    );
+
+    res.json(response);
+
+  } catch (err) {
+
+    console.error(err.message);
+
+    const fallback = await getSupabaseCache(
+      "anime_recommendations",
+      "id",
+      id,
+      999999999999
+    );
+
+    if (fallback?.data) {
+      return res.json(fallback.data);
+    }
+
+    res.json({
+      status: "ok",
+      results: [],
+    });
+  }
+});
+
+app.get("/api/search", async (req, res) => {
+
+  const keyword =
+    String(req.query.keyword || "")
+      .trim();
+
+  if (!keyword) {
+    return res.json({
+      status: "ok",
+      results: [],
+    });
+  }
+
+  try {
+
+    const cached = await getSupabaseCache(
+      "search_cache",
+      "key",
+      keyword.toLowerCase(),
+      6 * 60 * 60 * 1000
+    );
+
+    if (cached?.fresh) {
+      return res.json(cached.data);
+    }
+
+    const query = `
+      query ($search: String) {
+
+        Page(page: 1, perPage: 18) {
+
+          media(
+            search: $search,
+            type: ANIME
+          ) {
+            ${MEDIA_FIELDS}
+          }
+
+        }
+
+      }
+    `;
+
+    const data = await anilist(query, {
+      search: keyword,
+    });
+
+    const results =
+      data.Page.media.map(normalizeAnime);
+
+    const response = {
+      status: "ok",
+      results,
+    };
+
+    await setSupabaseCache(
+      "search_cache",
+      "key",
+      keyword.toLowerCase(),
+      response
+    );
+
+    res.json(response);
+
+  } catch (err) {
+
+    console.error(err.message);
+
+    const fallback = await getSupabaseCache(
+      "search_cache",
+      "key",
+      keyword.toLowerCase(),
+      999999999999
+    );
+
+    if (fallback?.data) {
+      return res.json(fallback.data);
+    }
+
+    res.json({
+      status: "ok",
+      results: [],
     });
   }
 });
 
 app.get("/api/seasons/:id", async (req, res) => {
+
+  const id = Number(req.params.id);
+
   try {
-    const id = Number(req.params.id);
+
+    const cached = await getSupabaseCache(
+      "anime_seasons",
+      "id",
+      id,
+      24 * 60 * 60 * 1000
+    );
+
+    if (cached?.fresh) {
+      return res.json(cached.data);
+    }
 
     const query = `
-      query ($id: Int) {
-        Media(id: $id, type: ANIME) {
+      query {
+        Media(id: ${id}, type: ANIME) {
+
           relations {
+
             edges {
+
               relationType
+
               node {
                 ${MEDIA_FIELDS}
               }
+
             }
+
           }
+
         }
       }
     `;
 
-    const data = await anilist(query, { id });
+    const data = await anilist(query);
 
     const results =
       data.Media.relations.edges
         .filter((edge) =>
           [
-            "PREQUEL",
             "SEQUEL",
-            "SIDE_STORY",
-            "PARENT",
-            "SPIN_OFF",
-            "ALTERNATIVE",
-            "SUMMARY",
+            "PREQUEL",
           ].includes(edge.relationType)
         )
-        .map((edge) => ({
-          relationType: edge.relationType,
-          ...normalizeAnime(edge.node),
-        })) || [];
+        .map((edge) =>
+          normalizeAnime(edge.node)
+        );
+
+    const response = {
+      status: "ok",
+      results,
+    };
+
+    await setSupabaseCache(
+      "anime_seasons",
+      "id",
+      id,
+      response
+    );
+
+    res.json(response);
+
+  } catch (err) {
+
+    console.error(err.message);
+
+    const fallback = await getSupabaseCache(
+      "anime_seasons",
+      "id",
+      id,
+      999999999999
+    );
+
+    if (fallback?.data) {
+      return res.json(fallback.data);
+    }
 
     res.json({
       status: "ok",
-      results,
-    });
-  } catch (err) {
-    console.error("Seasons error:", err.message);
-    res.status(500).json({
-      error: "Seasons fetch failed",
-      debug: err.message,
+      results: [],
     });
   }
 });
