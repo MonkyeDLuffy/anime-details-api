@@ -98,12 +98,77 @@ async function fetchWithRetry(fetchFunction, retries = 3, delay = 1000) {
   }
 }
 
+const anilistQueue = [];
+let processingQueue = false;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function processQueue() {
+  if (processingQueue) return;
+
+  processingQueue = true;
+
+  while (anilistQueue.length > 0) {
+    const item = anilistQueue.shift();
+
+    try {
+      const response = await axios.post(
+        ANILIST,
+        {
+          query: item.query,
+          variables: item.variables,
+        },
+        {
+          timeout: 30000,
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+        }
+      );
+
+      item.resolve(response.data.data);
+
+      // IMPORTANT:
+      // prevents AniList rate limit
+      await sleep(700);
+
+    } catch (error) {
+      console.log(
+        "AniList Error:",
+        error?.response?.status || error.message
+      );
+
+      // if rate limited → retry slowly
+      if (error?.response?.status === 429) {
+        console.log("429 hit → waiting 5 seconds...");
+
+        await sleep(5000);
+
+        anilistQueue.unshift(item);
+
+      } else {
+        item.reject(error);
+      }
+    }
+  }
+
+  processingQueue = false;
+}
+
 async function anilist(query, variables = {}) {
-  const res = await axios.post(ANILIST, {
-    query,
-    variables,
+  return new Promise((resolve, reject) => {
+    anilistQueue.push({
+      query,
+      variables,
+      resolve,
+      reject,
+    });
+
+    processQueue();
   });
-  return res.data.data;
 }
 
 const MEDIA_FIELDS = `
