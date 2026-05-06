@@ -51,16 +51,6 @@ function normalizeAnime(media) {
 
 const cache = new Map();
 
-const CACHE_TTL = {
- DETAILS: 30 * 60 * 60 * 1000,
-RECOMMENDATIONS: 24 * 60 * 60 * 1000,
-CHARACTERS: 24 * 60 * 60 * 1000,
-SEASONS: 24 * 60 * 60 * 1000,
-SEARCH: 6 * 60 * 60 * 1000,
-EPISODES: 30 * 60 * 60 * 1000,
-HOME: 10 * 60 * 1000,
-};
-
 async function getOrSetCache(key, ttl, fetchFunction) {
   const now = Date.now();
   const cached = cache.get(key);
@@ -200,6 +190,41 @@ async function anilist(query, variables = {}) {
     });
 
     processQueue();
+  });
+}
+
+const CACHE_TTL = {
+  HOME: 1000 * 60 * 60 * 2,
+  DETAILS: 1000 * 60 * 60 * 24,
+  EPISODES: 1000 * 60 * 60 * 24,
+  SEARCH: 1000 * 60 * 30,
+  RECOMMENDATIONS: 1000 * 60 * 60 * 24,
+  CHARACTERS: 1000 * 60 * 60 * 24,
+  SEASONS: 1000 * 60 * 60 * 24,
+};
+
+async function getSupabaseCache(table, key) {
+  const { data, error } = await supabase
+    .from(table)
+    .select("*")
+    .eq("cache_key", key)
+    .single();
+
+  if (error || !data) return null;
+
+  if (Date.now() - new Date(data.updated_at).getTime() > data.ttl) {
+    return null;
+  }
+
+  return data.payload;
+}
+
+async function setSupabaseCache(table, key, payload, ttl) {
+  await supabase.from(table).upsert({
+    cache_key: key,
+    payload,
+    ttl,
+    updated_at: new Date().toISOString(),
   });
 }
 
