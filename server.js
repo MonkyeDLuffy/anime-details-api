@@ -44,12 +44,13 @@ function normalizeAnime(media) {
 const cache = new Map();
 
 const CACHE_TTL = {
-  HOME: 5 * 60 * 1000,        // 5 minutes
-  ANIME: 24 * 60 * 60 * 1000,  // 24 hours
-  EPISODES: 10 * 60 * 1000,    // 10 minutes
-  SEARCH: 60 * 60 * 1000,      // 1 hour
-  TOP_SEARCH: 6 * 60 * 60 * 1000,
-  SCHEDULE: 15 * 60 * 1000,
+  HOME: 30 * 60 * 1000,
+EPISODES: 6 * 60 * 60 * 1000,
+DETAILS: 24 * 60 * 60 * 1000,
+RECOMMENDATIONS: 24 * 60 * 60 * 1000,
+CHARACTERS: 24 * 60 * 60 * 1000,
+SEASONS: 24 * 60 * 60 * 1000,
+SEARCH: 6 * 60 * 60 * 1000,
 };
 
 async function getOrSetCache(key, ttl, fetchFunction) {
@@ -316,35 +317,61 @@ app.get("/api/details/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
 
-    const query = `
-      query {
-        Media(id: ${id}, type: ANIME) {
-          ${MEDIA_FIELDS}
-          idMal
-          popularity
-          favourites
-          studios {
-            nodes {
-              name
+    const anime = await getOrSetCache(
+      `details:${id}`,
+      CACHE_TTL.DETAILS,
+      async () => {
+        const query = `
+          query {
+            Media(id: ${id}, type: ANIME) {
+              ${MEDIA_FIELDS}
+              idMal
+              popularity
+              favourites
+              studios {
+                nodes {
+                  name
+                }
+              }
             }
           }
+        `;
+
+        const data = await anilist(query);
+        const media = data?.Media;
+
+        if (!media) {
+          throw new Error("No anime details found");
         }
+
+        const normalized = normalizeAnime(media);
+
+        normalized.studios = media.studios?.nodes?.map((s) => s.name) || [];
+        normalized.popularity = media.popularity || 0;
+        normalized.favorites = media.favourites || 0;
+
+        return normalized;
       }
-    `;
-
-    const data = await anilist(query);
-    const anime = normalizeAnime(data.Media);
-
-    anime.studios = data.Media.studios?.nodes?.map((s) => s.name) || [];
-    anime.popularity = data.Media.popularity || 0;
-    anime.favorites = data.Media.favourites || 0;
+    );
 
     res.json(anime);
   } catch (err) {
     console.error("Details error:", err.message);
+
     res.status(500).json({
-      error: "Details failed",
-      debug: err.message,
+      id: Number(req.params.id),
+      title: "Anime",
+      poster: "",
+      image: "",
+      banner: "",
+      description: "No description available.",
+      genres: [],
+      episodes: 0,
+      status: "",
+      type: "TV",
+      studios: [],
+      popularity: 0,
+      favorites: 0,
     });
   }
 });
