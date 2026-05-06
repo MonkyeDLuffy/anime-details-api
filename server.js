@@ -372,7 +372,7 @@ app.get("/api/home", async (req, res) => {
       status: "ok",
 
       spotlight: result.trending.media
-        .slice(0, 6)
+        .slice(0, 10)
         .map(normalizeAnime),
 
       trending: result.trending.media
