@@ -203,29 +203,39 @@ const CACHE_TTL = {
   SEASONS: 1000 * 60 * 60 * 24,
 };
 
-async function getSupabaseCache(table, key) {
+async function getSupabaseCache(table, cacheKey) {
   const { data, error } = await supabase
     .from(table)
-    .select("*")
-    .eq("cache_key", key)
-    .single();
+    .select("payload, ttl, updated_at")
+    .eq("cache_key", cacheKey)
+    .maybeSingle();
 
   if (error || !data) return null;
 
-  if (Date.now() - new Date(data.updated_at).getTime() > data.ttl) {
-    return null;
-  }
+  const age = Date.now() - new Date(data.updated_at).getTime();
+  const fresh = age < Number(data.ttl);
 
-  return data.payload;
+  return {
+    fresh,
+    data: data.payload,
+  };
 }
 
-async function setSupabaseCache(table, key, payload, ttl) {
-  await supabase.from(table).upsert({
-    cache_key: key,
+async function setSupabaseCache(table, cacheKey, payload, ttl) {
+  if (!payload) return;
+
+  const { error } = await supabase.from(table).upsert({
+    cache_key: cacheKey,
     payload,
     ttl,
     updated_at: new Date().toISOString(),
   });
+
+  if (error) {
+    console.error("Supabase save error:", table, error.message);
+  } else {
+    console.log("✅ SUPABASE SAVED:", table, cacheKey);
+  }
 }
 
 const MEDIA_FIELDS = `
@@ -281,42 +291,46 @@ app.get("/", (req, res) => {
 
 app.get("/api/home", async (req, res) => {
   try {
+    const HOME_CACHE_KEY = "main";
+    const HOME_TTL = 1000 * 60 * 60 * 4; // 4 hours
 
-    const cached = await getSupabaseCache(
-      "home_cache",
-      "key",
-      "main",
-      10 * 60 * 1000
-    );
+    const cached = await getSupabaseCache("home_cache", HOME_CACHE_KEY);
 
     if (cached?.fresh) {
-      console.log("SUPABASE HOME CACHE HIT");
+      console.log("✅ SUPABASE HOME CACHE HIT");
       return res.json(cached.data);
     }
 
-    console.log("FETCHING FRESH HOME");
+    console.log("❌ FETCHING FRESH HOME");
 
     const query = `
       query {
-
         trending: Page(page: 1, perPage: 10) {
           media(sort: TRENDING_DESC, type: ANIME) {
             ${MEDIA_FIELDS}
           }
         }
 
-        popular: Page(page: 1, perPage: 12) {
-          media(sort: POPULARITY_DESC, type: ANIME) {
-            ${MEDIA_FIELDS}
-          }
-        }
-
         latest: Page(page: 1, perPage: 12) {
-          media(sort: UPDATED_AT_DESC, type: ANIME) {
+          media(
+            sort: UPDATED_AT_DESC,
+            type: ANIME,
+            status_in: [RELEASING]
+          ) {
             ${MEDIA_FIELDS}
           }
         }
 
+        topAiring: Page(page: 1, perPage: 12) {
+          media(
+            sort: SCORE_DESC,
+            type: ANIME,
+            status: RELEASING,
+            format_in: [TV, ONA]
+          ) {
+            ${MEDIA_FIELDS}
+          }
+        }
       }
     `;
 
@@ -325,43 +339,32 @@ app.get("/api/home", async (req, res) => {
     const response = {
       status: "ok",
 
-      spotlight:
-        result.trending.media
-          .slice(0, 6)
-          .map(normalizeAnime),
+      spotlight: result.trending.media
+        .slice(0, 6)
+        .map(normalizeAnime),
 
-      trending:
-        result.trending.media
-          .map(normalizeAnime),
+      trending: result.trending.media
+        .map(normalizeAnime),
 
-      latest_episode:
-        result.latest.media
-          .map(normalizeAnime),
+      latest_episode: result.latest.media
+        .map(normalizeAnime),
 
-      top_airing:
-        result.popular.media
-          .map(normalizeAnime),
+      top_airing: result.topAiring.media
+        .map(normalizeAnime),
     };
 
     await setSupabaseCache(
       "home_cache",
-      "key",
-      "main",
-      response
+      HOME_CACHE_KEY,
+      response,
+      HOME_TTL
     );
 
     res.json(response);
-
   } catch (err) {
+    console.error("Home error:", err.message);
 
-    console.error(err.message);
-
-    const fallback = await getSupabaseCache(
-      "home_cache",
-      "key",
-      "main",
-      999999999999
-    );
+    const fallback = await getSupabaseCache("home_cache", "main");
 
     if (fallback?.data) {
       return res.json(fallback.data);
