@@ -44,13 +44,13 @@ function normalizeAnime(media) {
 const cache = new Map();
 
 const CACHE_TTL = {
-  HOME: 30 * 60 * 1000,
-EPISODES: 6 * 60 * 60 * 1000,
-DETAILS: 24 * 60 * 60 * 1000,
+ DETAILS: 24 * 60 * 60 * 1000,
 RECOMMENDATIONS: 24 * 60 * 60 * 1000,
 CHARACTERS: 24 * 60 * 60 * 1000,
 SEASONS: 24 * 60 * 60 * 1000,
 SEARCH: 6 * 60 * 60 * 1000,
+EPISODES: 6 * 60 * 60 * 1000,
+HOME: 30 * 60 * 1000,
 };
 
 async function getOrSetCache(key, ttl, fetchFunction) {
@@ -67,10 +67,12 @@ async function getOrSetCache(key, ttl, fetchFunction) {
 
     const freshData = await fetchFunction();
 
-    cache.set(key, {
-      data: freshData,
-      expiry: now + ttl,
-    });
+    if (freshData) {
+  cache.set(key, {
+    data: freshData,
+    expiry: now + ttl,
+  });
+}
 
     return freshData;
   } catch (error) {
@@ -84,6 +86,8 @@ async function getOrSetCache(key, ttl, fetchFunction) {
     throw error;
   }
 }
+
+const pendingRequests = new Map();
 
 async function fetchWithRetry(fetchFunction, retries = 3, delay = 1000) {
   for (let i = 0; i < retries; i++) {
@@ -134,7 +138,7 @@ async function processQueue() {
 
       // IMPORTANT:
       // prevents AniList rate limit
-      await sleep(700);
+      await sleep(1200);
 
     } catch (error) {
       console.log(
@@ -144,15 +148,9 @@ async function processQueue() {
 
       // if rate limited → retry slowly
       if (error?.response?.status === 429) {
-        console.log("429 hit → waiting 5 seconds...");
-
-        await sleep(5000);
-
-        anilistQueue.unshift(item);
-
-      } else {
-        item.reject(error);
-      }
+  console.log("429 hit → failing fast, cache fallback will handle it");
+  item.reject(error);
+}
     }
   }
 
@@ -225,90 +223,62 @@ app.get("/", (req, res) => {
 
 app.get("/api/home", async (req, res) => {
   try {
-    const data = await getOrSetCache("home", CACHE_TTL.HOME, async () => {
-      console.log("📡 Fetching home data...");
+    const data = await getOrSetCache(
+      "home",
+      CACHE_TTL.HOME,
+      async () => {
 
-      const results = await Promise.allSettled([
-        getList("TRENDING_DESC"),
-        getList("POPULARITY_DESC"),
-        getList("POPULARITY_DESC", "", { status: "RELEASING" }),
-        getList("POPULARITY_DESC", "", { status: "NOT_YET_RELEASED" }),
-        getList("UPDATED_AT_DESC"),
-      ]);
+        console.log("Fetching fresh home data...");
 
-      const trending = results[0].status === "fulfilled" ? results[0].value : [];
-      const popular = results[1].status === "fulfilled" ? results[1].value : [];
-      const airing = results[2].status === "fulfilled" ? results[2].value : [];
-      const upcoming = results[3].status === "fulfilled" ? results[3].value : [];
-      const latestEpisodes = results[4].status === "fulfilled" ? results[4].value : [];
+        const query = `
+          query {
+            trending: Page(page: 1, perPage: 10) {
+              media(sort: TRENDING_DESC, type: ANIME) {
+                ${MEDIA_FIELDS}
+              }
+            }
 
-      const finalData = {
-        spotlights: trending.slice(0, 8),
+            popular: Page(page: 1, perPage: 12) {
+              media(sort: POPULARITY_DESC, type: ANIME) {
+                ${MEDIA_FIELDS}
+              }
+            }
 
-        trending,
+            latest: Page(page: 1, perPage: 12) {
+              media(sort: UPDATED_AT_DESC, type: ANIME) {
+                ${MEDIA_FIELDS}
+              }
+            }
+          }
+        `;
 
-        topTen: popular.slice(0, 10),
-        topten: popular.slice(0, 10),
+        const result = await anilist(query);
 
-        today: airing,
-        todaySchedule: airing,
+        return {
+          status: "ok",
 
-        topAiring: airing,
-        top_airing: airing,
+          spotlight: result.trending.media
+            .slice(0, 6)
+            .map(normalizeAnime),
 
-        mostPopular: popular,
-        most_popular: popular,
+          trending: result.trending.media.map(normalizeAnime),
 
-        mostFavorite: trending,
-        most_favorite: trending,
+          latest_episode: result.latest.media.map(normalizeAnime),
 
-        latestCompleted: popular,
-        latest_completed: popular,
-
-        latestEpisode: latestEpisodes.length ? latestEpisodes : airing,
-        latest_episode: latestEpisodes.length ? latestEpisodes : airing,
-
-        topUpcoming: upcoming,
-        top_upcoming: upcoming,
-
-        recentlyAdded: latestEpisodes.length ? latestEpisodes : popular,
-        recently_added: latestEpisodes.length ? latestEpisodes : popular,
-
-        genres: [
-          "Action",
-          "Adventure",
-          "Comedy",
-          "Drama",
-          "Fantasy",
-          "Romance",
-          "Sci-Fi",
-          "Horror",
-          "Mystery",
-        ],
-      };
-
-      return {
-        status: "ok",
-        results: finalData,
-        ...finalData,
-      };
-    });
+          top_airing: result.popular.media.map(normalizeAnime),
+        };
+      }
+    );
 
     res.json(data);
-  } catch (error) {
-    console.error("Home error:", error.message);
+
+  } catch (err) {
+
+    console.error("Home error:", err.message);
 
     res.status(500).json({
       status: "error",
-      results: {
-        spotlights: [],
-        trending: [],
-        latestEpisode: [],
-        latest_episode: [],
-        topTen: [],
-        topten: [],
-        genres: [],
-      },
+      results: null,
     });
   }
 });
