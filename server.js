@@ -392,7 +392,20 @@ app.get("/api/episodes/:id", async (req, res) => {
       totalEpisodes = anime.episodes;
     }
 
-    const image = anime.coverImage?.large || anime.coverImage?.medium || "";
+    const episodes = Array.from({ length: totalEpisodes }, (_, index) => {
+  const ep = index + 1;
+
+  return {
+    id: `${anime.id}-${ep}`,
+    number: ep,
+    episode: ep,
+    episodeId: ep,
+    title: `Episode ${ep}`,
+    image: "",
+    thumbnail: "",
+    url: `/watch/${anime.id}?ep=${ep}`,
+  };
+});
 
     const episodes = Array.from({ length: totalEpisodes }, (_, index) => {
       const ep = index + 1;
