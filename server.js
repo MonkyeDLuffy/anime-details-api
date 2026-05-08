@@ -373,10 +373,6 @@ app.get("/api/episodes/:id", async (req, res) => {
             romaji
             english
           }
-          coverImage {
-            medium
-            large
-          }
         }
       }
     `;
@@ -393,29 +389,16 @@ app.get("/api/episodes/:id", async (req, res) => {
     }
 
     const episodes = Array.from({ length: totalEpisodes }, (_, index) => {
-  const ep = index + 1;
-
-  return {
-    id: `${anime.id}-${ep}`,
-    number: ep,
-    episode: ep,
-    episodeId: ep,
-    title: `Episode ${ep}`,
-    image: "",
-    thumbnail: "",
-    url: `/watch/${anime.id}?ep=${ep}`,
-  };
-});
-
-    const episodes = Array.from({ length: totalEpisodes }, (_, index) => {
       const ep = index + 1;
 
       return {
         id: `${anime.id}-${ep}`,
         number: ep,
+        episode: ep,
         episodeId: ep,
         title: `Episode ${ep}`,
-        image,
+        image: "",
+        thumbnail: "",
         url: `/watch/${anime.id}?ep=${ep}`,
       };
     });
