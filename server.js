@@ -9,6 +9,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 const ANILIST = "https://graphql.anilist.co";
+const JIKAN = "https://api.jikan.moe/v4";
 
 app.use(cors());
 app.use(express.json());
@@ -27,6 +28,7 @@ function normalizeAnime(media) {
 
   return {
     id: media.id,
+    malId: media.idMal || null,
     title: media.title?.english || media.title?.romaji || media.title?.native,
     poster: media.coverImage?.extraLarge,
     image: media.coverImage?.extraLarge,
@@ -154,6 +156,9 @@ const TTL = {
   CHARACTERS: 1000 * 60 * 60 * 24,
   RECOMMENDATIONS: 1000 * 60 * 60 * 24,
   SEASONS: 1000 * 60 * 60 * 24,
+
+  JIKAN_DETAILS: 1000 * 60 * 60 * 24 * 7,
+  JIKAN_SEARCH: 1000 * 60 * 60 * 24,
 };
 
 const MEDIA_FIELDS = `
@@ -178,6 +183,7 @@ const MEDIA_FIELDS = `
   season
   seasonYear
   isAdult
+  idMal
   nextAiringEpisode {
     episode
   }
@@ -187,6 +193,89 @@ const SAFE_FILTER = `
   isAdult: false,
   genre_not_in: ["Hentai", "Ecchi"]
 `;
+
+function cleanJikanAnime(anime) {
+  if (!anime) return null;
+
+  return {
+    malId: anime.mal_id,
+    url: anime.url,
+
+    title: anime.title,
+    titleEnglish: anime.title_english,
+    titleJapanese: anime.title_japanese,
+    titles: anime.titles || [],
+    titleSynonyms: anime.title_synonyms || [],
+
+    image:
+      anime.images?.webp?.large_image_url ||
+      anime.images?.jpg?.large_image_url ||
+      anime.images?.webp?.image_url ||
+      anime.images?.jpg?.image_url ||
+      null,
+
+    poster:
+      anime.images?.webp?.large_image_url ||
+      anime.images?.jpg?.large_image_url ||
+      anime.images?.webp?.image_url ||
+      anime.images?.jpg?.image_url ||
+      null,
+
+    trailer: {
+      youtubeId: anime.trailer?.youtube_id || null,
+      url: anime.trailer?.url || null,
+      embedUrl: anime.trailer?.embed_url || null,
+      image:
+        anime.trailer?.images?.maximum_image_url ||
+        anime.trailer?.images?.large_image_url ||
+        anime.trailer?.images?.medium_image_url ||
+        null,
+    },
+
+    type: anime.type,
+    source: anime.source,
+    episodes: anime.episodes,
+    status: anime.status,
+    airing: anime.airing,
+
+    score: anime.score,
+    scoredBy: anime.scored_by,
+    rank: anime.rank,
+    popularity: anime.popularity,
+    members: anime.members,
+    favorites: anime.favorites,
+
+    duration: anime.duration,
+    rating: anime.rating,
+
+    season: anime.season,
+    year: anime.year,
+
+    aired: {
+      from: anime.aired?.from || null,
+      to: anime.aired?.to || null,
+      string: anime.aired?.string || null,
+    },
+
+    broadcast: {
+      day: anime.broadcast?.day || null,
+      time: anime.broadcast?.time || null,
+      timezone: anime.broadcast?.timezone || null,
+      string: anime.broadcast?.string || null,
+    },
+
+    studios: anime.studios?.map((s) => s.name) || [],
+    producers: anime.producers?.map((p) => p.name) || [],
+    licensors: anime.licensors?.map((l) => l.name) || [],
+    genres: anime.genres?.map((g) => g.name) || [],
+    explicitGenres: anime.explicit_genres?.map((g) => g.name) || [],
+    themes: anime.themes?.map((t) => t.name) || [],
+    demographics: anime.demographics?.map((d) => d.name) || [],
+
+    synopsis: anime.synopsis,
+    background: anime.background,
+  };
+}
 
 app.get("/", (req, res) => {
   res.send("🔥 Anime API Running");
@@ -199,6 +288,305 @@ app.get("/api/health", (req, res) => {
     time: Date.now(),
   });
 });
+
+/* ===============================
+   JIKAN PROXY ROUTES
+================================ */
+
+// Get Jikan anime by MAL ID
+app.get("/api/jikan/anime/:malId", async (req, res) => {
+  const malId = Number(req.params.malId);
+
+  if (!malId) {
+    return res.status(400).json({
+      status: "error",
+      error: "Invalid MAL ID",
+    });
+  }
+
+  try {
+    const cacheKey = `jikan-anime-${malId}`;
+    const cached = await getSupabaseCache("anime_details", cacheKey);
+
+    if (cached?.fresh) {
+      return res.json({
+        status: "ok",
+        source: "cache",
+        data: cached.data,
+      });
+    }
+
+    const response = await axios.get(`${JIKAN}/anime/${malId}/full`, {
+      timeout: 20000,
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    const cleaned = cleanJikanAnime(response.data?.data);
+
+    if (!cleaned) {
+      return res.status(404).json({
+        status: "error",
+        error: "Anime not found from Jikan",
+      });
+    }
+
+    await setSupabaseCache(
+      "anime_details",
+      cacheKey,
+      cleaned,
+      TTL.JIKAN_DETAILS
+    );
+
+    res.json({
+      status: "ok",
+      source: "jikan",
+      data: cleaned,
+    });
+  } catch (err) {
+    console.error("Jikan anime error:", err?.response?.status || err.message);
+
+    const fallback = await getSupabaseCache("anime_details", `jikan-anime-${malId}`);
+
+    if (fallback?.data) {
+      return res.json({
+        status: "ok",
+        source: "stale-cache",
+        data: fallback.data,
+      });
+    }
+
+    res.status(500).json({
+      status: "error",
+      error: "Failed to fetch Jikan anime",
+      debug: err.message,
+    });
+  }
+});
+
+// Search Jikan by title
+app.get("/api/jikan/search", async (req, res) => {
+  const keyword = String(req.query.q || req.query.keyword || "").trim();
+
+  if (!keyword) {
+    return res.status(400).json({
+      status: "error",
+      error: "Missing search query. Use ?q=one piece",
+    });
+  }
+
+  try {
+    const cacheKey = `jikan-search-${keyword.toLowerCase()}`;
+    // TEMP DISABLE CACHE
+// const cached = await getSupabaseCache("search_cache", cacheKey);
+
+// if (cached?.fresh) {
+//   return res.json({
+//     status: "ok",
+//     source: "cache",
+//     results: cached.data,
+//   });
+// }
+
+    const response = await axios.get(`${JIKAN}/anime`, {
+      params: {
+        q: keyword,
+        limit: 8,
+        sfw: true,
+      },
+      timeout: 20000,
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    const results = (response.data?.data || [])
+  .map(cleanJikanAnime)
+  .filter(Boolean)
+  .sort((a, b) => {
+    const q = keyword.toLowerCase();
+
+    const aExact =
+      a.title?.toLowerCase() === q || a.titleEnglish?.toLowerCase() === q;
+    const bExact =
+      b.title?.toLowerCase() === q || b.titleEnglish?.toLowerCase() === q;
+
+    if (aExact && !bExact) return -1;
+    if (!aExact && bExact) return 1;
+
+    const aTv = a.type === "TV";
+    const bTv = b.type === "TV";
+
+    if (aTv && !bTv) return -1;
+    if (!aTv && bTv) return 1;
+
+    return (b.members || 0) - (a.members || 0);
+  });
+
+    await setSupabaseCache(
+      "search_cache",
+      cacheKey,
+      results,
+      TTL.JIKAN_SEARCH
+    );
+
+    res.json({
+      status: "ok",
+      source: "jikan",
+      results,
+    });
+  } catch (err) {
+    console.error("Jikan search error:", err?.response?.status || err.message);
+
+    const fallback = await getSupabaseCache(
+      "search_cache",
+      `jikan-search-${keyword.toLowerCase()}`
+    );
+
+    if (fallback?.data) {
+      return res.json({
+        status: "ok",
+        source: "stale-cache",
+        results: fallback.data,
+      });
+    }
+
+    res.status(500).json({
+      status: "error",
+      error: "Failed to search Jikan",
+      debug: err.message,
+    });
+  }
+});
+
+// AniList ID -> Jikan MAL details
+app.get("/api/jikan/from-anilist/:id", async (req, res) => {
+  const id = Number(req.params.id);
+
+  if (!id) {
+    return res.status(400).json({
+      status: "error",
+      error: "Invalid AniList ID",
+    });
+  }
+
+  try {
+    const cacheKey = `jikan-from-anilist-${id}`;
+    const cached = await getSupabaseCache("anime_details", cacheKey);
+
+    if (cached?.fresh) {
+      return res.json({
+        status: "ok",
+        source: "cache",
+        data: cached.data,
+      });
+    }
+
+    const query = `
+      query ($id: Int) {
+        Media(id: $id, type: ANIME) {
+          id
+          idMal
+          title {
+            romaji
+            english
+            native
+          }
+        }
+      }
+    `;
+
+    const data = await anilist(query, { id });
+    const media = data?.Media;
+
+    if (!media) {
+      return res.status(404).json({
+        status: "error",
+        error: "AniList anime not found",
+      });
+    }
+
+    let malId = media.idMal;
+
+    if (!malId) {
+      const fallbackTitle =
+        media.title?.english || media.title?.romaji || media.title?.native;
+
+      const searchResponse = await axios.get(`${JIKAN}/anime`, {
+        params: {
+          q: fallbackTitle,
+          limit: 1,
+          sfw: true,
+        },
+        timeout: 20000,
+      });
+
+      malId = searchResponse.data?.data?.[0]?.mal_id;
+    }
+
+    if (!malId) {
+      return res.status(404).json({
+        status: "error",
+        error: "MAL ID not found",
+      });
+    }
+
+    await sleep(450);
+
+    const jikanResponse = await axios.get(`${JIKAN}/anime/${malId}/full`, {
+      timeout: 20000,
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    const cleaned = cleanJikanAnime(jikanResponse.data?.data);
+
+    await setSupabaseCache(
+      "anime_details",
+      cacheKey,
+      cleaned,
+      TTL.JIKAN_DETAILS
+    );
+
+    res.json({
+      status: "ok",
+      source: "jikan",
+      anilistId: id,
+      malId,
+      data: cleaned,
+    });
+  } catch (err) {
+    console.error(
+      "Jikan from AniList error:",
+      err?.response?.status || err.message
+    );
+
+    const fallback = await getSupabaseCache(
+      "anime_details",
+      `jikan-from-anilist-${id}`
+    );
+
+    if (fallback?.data) {
+      return res.json({
+        status: "ok",
+        source: "stale-cache",
+        data: fallback.data,
+      });
+    }
+
+    res.status(500).json({
+      status: "error",
+      error: "Failed to fetch Jikan data from AniList ID",
+      debug: err.message,
+    });
+  }
+});
+
+/* ===============================
+   EXISTING ANILIST ROUTES
+================================ */
 
 app.get("/api/home", async (req, res) => {
   try {
@@ -314,7 +702,6 @@ app.get("/api/details/:id", async (req, res) => {
       query ($id: Int) {
         Media(id: $id, type: ANIME) {
           ${MEDIA_FIELDS}
-          idMal
           popularity
           favourites
           studios {
@@ -811,9 +1198,9 @@ app.get("/api/category/:type", async (req, res) => {
       "most-popular": "POPULARITY_DESC",
       movies: "POPULARITY_DESC",
       "tv-series": "POPULARITY_DESC",
-      ovas: "POPULARITY_DESC",
-      onas: "POPULARITY_DESC",
-      specials: "POPULARITY_DESC",
+      ovas: "OVA",
+      onas: "ONA",
+      specials: "SPECIAL",
     };
 
     const formatMap = {
