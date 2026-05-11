@@ -905,84 +905,39 @@ async function resolveAnikoto(
   }
 }
 
-async function resolveStream(
-  anilistId,
-  ep,
-  lang = "sub"
-) {
+async function resolveStream(anilistId, ep, lang = "sub") {
   try {
     const cacheKey = `stream-${anilistId}-${ep}-${lang}`;
 
-    const cached = await getSupabaseCache(
-      "stream_cache",
-      cacheKey
-    );
+    const cached = await getSupabaseCache("stream_cache", cacheKey);
+    if (cached?.fresh) return cached.data;
 
-    if (cached?.fresh) {
-      return cached.data;
-    }
-
-    const details =
-      await getAnimeDetails(anilistId);
+    const details = await getAnimeDetails(anilistId);
 
     if (!details) {
-      return {
-        success: false,
-      };
+      return { success: false };
     }
 
-    const mega =
-      await resolveMegaPlay(
-        anilistId,
-        ep,
-        lang
-      );
-
-    if (mega?.success) {
-      await setSupabaseCache(
-        "stream_cache",
-        cacheKey,
-        mega,
-        TTL.STREAM
-      );
-
-      return mega;
-    }
-
-    console.log(
-      "⚠️ MegaPlay failed, switching to Anikoto..."
-    );
-
-    const anikoto =
-      await resolveAnikoto(
-        details.title,
-        ep,
-        lang
-      );
+    // ✅ Try Anikoto first because MegaPlay gives fake success pages
+    const anikoto = await resolveAnikoto(details.title, ep, lang);
 
     if (anikoto?.success) {
-      await setSupabaseCache(
-        "stream_cache",
-        cacheKey,
-        anikoto,
-        TTL.STREAM
-      );
-
+      await setSupabaseCache("stream_cache", cacheKey, anikoto, TTL.STREAM);
       return anikoto;
     }
 
-    return {
-      success: false,
-    };
-  } catch (error) {
-    console.log(
-      "Resolve stream error:",
-      error.message
-    );
+    // Backup MegaPlay
+    const mega = await resolveMegaPlay(anilistId, ep, lang);
 
-    return {
-      success: false,
-    };
+    if (mega?.success) {
+      await setSupabaseCache("stream_cache", cacheKey, mega, TTL.STREAM);
+      return mega;
+    }
+
+    return { success: false };
+  } catch (error) {
+    console.log("Resolve stream error:", error.message);
+    return { success: false };
   }
 }
 
