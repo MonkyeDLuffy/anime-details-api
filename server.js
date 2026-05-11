@@ -806,85 +806,40 @@ async function getHomeData() {
   }
 }
 
-async function resolveMegaPlay(
-  anilistId,
-  ep,
-  lang = "sub"
-) {
+async function resolveMegaPlay(anilistId, ep, lang = "sub") {
   try {
     const embed = `${MEGAPLAY}/stream/ani/${anilistId}/${ep}/${lang}`;
 
     const response = await axios.get(embed, {
       timeout: 15000,
       validateStatus: () => true,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+      },
     });
 
-    if (
-      response.status === 200 &&
-      response.data
-    ) {
-      return {
-        source: "megaplay",
-        success: true,
-        embed,
-      };
+    const html = String(response.data || "").toLowerCase();
+
+    const isBad =
+      response.status >= 400 ||
+      html.includes("oops") ||
+      html.includes("404") ||
+      html.includes("something went wrong") ||
+      html.includes("page you're looking for doesn't exist") ||
+      html.length < 500;
+
+    if (isBad) {
+      console.log("❌ MegaPlay invalid, fallback needed:", embed);
+      return null;
     }
 
-    return null;
+    return {
+      source: "megaplay",
+      success: true,
+      embed,
+    };
   } catch {
-    return null;
-  }
-}
-
-async function searchAnikotoSeries(
-  animeTitle
-) {
-  try {
-    const cacheKey = `anikoto-${animeTitle}`;
-
-    const cached = await getSupabaseCache(
-      "stream_cache",
-      cacheKey
-    );
-
-    if (cached?.fresh) {
-      return cached.data;
-    }
-
-    const response = await axios.get(
-      `${ANIKOTO}/recent-anime?page=1&per_page=100`,
-      {
-        timeout: 20000,
-      }
-    );
-
-    const rows =
-      response.data?.results || [];
-
-    const found = rows.find((anime) =>
-      anime.title
-        ?.toLowerCase()
-        .includes(
-          animeTitle.toLowerCase()
-        )
-    );
-
-    if (!found) return null;
-
-    await setSupabaseCache(
-      "stream_cache",
-      cacheKey,
-      found,
-      TTL.ANIKOTO_MAP
-    );
-
-    return found;
-  } catch (error) {
-    console.log(
-      "Anikoto search fail:",
-      error.message
-    );
-
     return null;
   }
 }
