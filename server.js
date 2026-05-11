@@ -11,6 +11,8 @@ const PORT = process.env.PORT || 5000;
 
 const ANILIST = "https://graphql.anilist.co";
 const JIKAN = "https://api.jikan.moe/v4";
+const MEGAPLAY = "https://megaplay.buzz";
+const ANIKOTO = "https://anikotoapi.site";
 
 app.use(cors());
 app.use(express.json());
@@ -31,6 +33,8 @@ const TTL = {
   JIKAN_DETAILS: 1000 * 60 * 60 * 24 * 7,
   JIKAN_SEARCH: 1000 * 60 * 60 * 24,
   ID_MAP: 1000 * 60 * 60 * 24 * 30,
+  STREAM: 1000 * 60 * 60 * 24 * 7,
+  ANIKOTO_MAP: 1000 * 60 * 60 * 24 * 30,
 };
 
 const MEDIA_FIELDS = `
@@ -323,199 +327,709 @@ async function jikanGet(path, params = {}) {
   return response.data;
 }
 
-/* ===============================
-   SMART ID CONVERSION
-================================ */
+async function convertMalToAniList(malId) {
+  try {
+    const cacheKey = `mal-anilist-${malId}`;
 
-async function anilistToMal(anilistId) {
-  const cacheKey = `anilist-to-mal-${anilistId}`;
-  const cached = await getSupabaseCache("search_cache", cacheKey);
+    const cached = await getSupabaseCache("search_cache", cacheKey);
 
-  if (cached?.fresh) return cached.data;
+    if (cached?.fresh) {
+      return cached.data;
+    }
 
-  const query = `
-    query ($id: Int) {
-      Media(id: $id, type: ANIME) {
-        id
-        idMal
-        title {
-          romaji
-          english
-          native
+    const query = `
+      query ($idMal: Int) {
+        Media(idMal: $idMal, type: ANIME) {
+          id
         }
       }
+    `;
+
+    const data = await anilist(query, {
+      idMal: Number(malId),
+    });
+
+    const id = data?.Media?.id || null;
+
+    if (id) {
+      await setSupabaseCache(
+        "search_cache",
+        cacheKey,
+        id,
+        TTL.ID_MAP
+      );
     }
-  `;
 
-  const data = await anilist(query, { id: Number(anilistId) });
-  const media = data?.Media;
+    return id;
+  } catch (error) {
+    console.log(
+      "MAL -> AniList conversion failed:",
+      malId
+    );
 
-  if (!media) return null;
-
-  let malId = media.idMal || null;
-
-  if (!malId) {
-    const title = media.title?.english || media.title?.romaji || media.title?.native;
-
-    if (title) {
-      const search = await jikanGet("/anime", {
-        q: title,
-        limit: 1,
-        sfw: true,
-      });
-
-      malId = search?.data?.[0]?.mal_id || null;
-    }
+    return null;
   }
-
-  const result = {
-    anilistId: Number(anilistId),
-    malId,
-    title: media.title?.english || media.title?.romaji || media.title?.native,
-  };
-
-  await setSupabaseCache("search_cache", cacheKey, result, TTL.ID_MAP);
-
-  return result;
 }
 
-async function malToAnilist(malId) {
-  const cacheKey = `mal-to-anilist-${malId}`;
-  const cached = await getSupabaseCache("search_cache", cacheKey);
+async function searchAniList(keyword) {
+  try {
+    const query = `
+      query ($search: String) {
+        Page(page: 1, perPage: 25) {
+          media(
+            search: $search,
+            type: ANIME,
+            sort: POPULARITY_DESC,
+            ${SAFE_FILTER}
+          ) {
+            ${MEDIA_FIELDS}
+          }
+        }
+      }
+    `;
 
-  if (cached?.fresh) return cached.data;
+    const data = await anilist(query, {
+      search: keyword,
+    });
 
-  const query = `
-    query ($idMal: Int) {
-      Media(idMal: $idMal, type: ANIME) {
-        ${MEDIA_FIELDS}
+    return safeAnimeList(
+      data?.Page?.media || []
+    );
+  } catch (error) {
+    console.log(
+      "AniList search failed:",
+      error?.response?.status || error.message
+    );
+
+    return [];
+  }
+}
+
+async function searchJikan(keyword) {
+  try {
+    const data = await jikanGet("/anime", {
+      q: keyword,
+      limit: 25,
+    });
+
+    const cleaned = (data?.data || [])
+      .map(cleanJikanAnime)
+      .filter(Boolean);
+
+    const final = [];
+
+    for (const anime of cleaned) {
+      const anilistId = anime.malId
+        ? await convertMalToAniList(anime.malId)
+        : null;
+
+      final.push({
+        ...anime,
+        anilistId:
+          anilistId || anime.malId,
+        id:
+          anilistId || anime.malId,
+      });
+    }
+
+    return final;
+  } catch (error) {
+    console.log(
+      "Jikan search failed:",
+      error?.response?.status || error.message
+    );
+
+    return [];
+  }
+}
+
+async function getAnimeDetails(anilistId) {
+  try {
+    const cacheKey = `anime-details-${anilistId}`;
+
+    const cached = await getSupabaseCache(
+      "anime_details",
+      cacheKey
+    );
+
+    if (cached?.fresh) {
+      console.log(
+        "✅ DETAILS CACHE HIT"
+      );
+
+      return cached.data;
+    }
+
+    const query = `
+      query ($id: Int) {
+        Media(id: $id, type: ANIME) {
+          ${MEDIA_FIELDS}
+
+          trailer {
+            id
+            site
+            thumbnail
+          }
+
+          rankings {
+            rank
+            type
+            allTime
+          }
+
+          studios(isMain: true) {
+            nodes {
+              name
+            }
+          }
+
+          relations {
+            edges {
+              relationType
+              node {
+                id
+                title {
+                  romaji
+                  english
+                }
+                coverImage {
+                  large
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const data = await anilist(query, {
+      id: Number(anilistId),
+    });
+
+    const media = data?.Media;
+
+    if (!media) {
+      return null;
+    }
+
+    let jikan = null;
+
+    if (media.idMal) {
+      try {
+        const jikanData = await jikanGet(
+          `/anime/${media.idMal}/full`
+        );
+
+        jikan = cleanJikanAnime(
+          jikanData?.data
+        );
+      } catch (err) {
+        console.log(
+          "Jikan detail fail:",
+          media.idMal
+        );
       }
     }
-  `;
 
-  const data = await anilist(query, { idMal: Number(malId) });
-  const media = data?.Media;
+    const normalized =
+      normalizeAnime(media);
 
-  if (!media) return null;
+    const finalData = {
+      ...normalized,
 
-  const result = normalizeAnime(media);
+      malId: media.idMal,
 
-  await setSupabaseCache("search_cache", cacheKey, result, TTL.ID_MAP);
+      trailer:
+        jikan?.trailer ||
+        media.trailer ||
+        null,
 
-  return result;
+      studios:
+        jikan?.studios ||
+        media.studios?.nodes?.map(
+          (s) => s.name
+        ) ||
+        [],
+
+      relations:
+        media.relations?.edges || [],
+
+      ranking:
+        media.rankings || [],
+
+      popularity:
+        jikan?.popularity || null,
+
+      members:
+        jikan?.members || null,
+
+      favorites:
+        jikan?.favorites || null,
+
+      broadcast:
+        jikan?.broadcast || null,
+
+      duration:
+        jikan?.duration || null,
+
+      rating:
+        jikan?.rating || null,
+
+      source:
+        jikan?.source || null,
+    };
+
+    await setSupabaseCache(
+      "anime_details",
+      cacheKey,
+      finalData,
+      TTL.DETAILS
+    );
+
+    return finalData;
+  } catch (error) {
+    console.log(
+      "Details error:",
+      error?.response?.status || error.message
+    );
+
+    return null;
+  }
 }
 
-async function getJikanDetailsByMal(malId) {
-  if (!malId) return null;
+async function getAnimeEpisodes(anilistId) {
+  try {
+    const cacheKey = `anime-episodes-${anilistId}`;
 
-  const cacheKey = `jikan-anime-${malId}`;
-  const cached = await getSupabaseCache("anime_details", cacheKey);
+    const cached = await getSupabaseCache(
+      "anime_episodes",
+      cacheKey
+    );
 
-  if (cached?.fresh) return cached.data;
+    if (cached?.fresh) {
+      console.log(
+        "✅ EPISODES CACHE HIT"
+      );
 
-  const json = await jikanGet(`/anime/${malId}/full`);
-  const cleaned = cleanJikanAnime(json?.data);
+      return cached.data;
+    }
 
-  if (!cleaned) return null;
+    const details =
+      await getAnimeDetails(anilistId);
 
-  await setSupabaseCache("anime_details", cacheKey, cleaned, TTL.JIKAN_DETAILS);
+    if (!details?.malId) {
+      return [];
+    }
 
-  return cleaned;
+    const response = await jikanGet(
+      `/anime/${details.malId}/episodes`
+    );
+
+    const episodes =
+      response?.data || [];
+
+    const finalEpisodes =
+      episodes.map((ep) => ({
+        id: ep.mal_id || ep.mal_id,
+        number: ep.mal_id
+          ? ep.mal_id
+          : ep.mal_id,
+
+        episodeId:
+          ep.mal_id ||
+          ep.mal_id,
+
+        title:
+          ep.title ||
+          `Episode ${ep.mal_id}`,
+
+        description:
+          ep.synopsis || "",
+
+        image:
+          ep.images?.jpg
+            ?.image_url || null,
+
+        aired: ep.aired,
+        filler: ep.filler,
+        recap: ep.recap,
+
+        score: ep.score,
+
+        episodeNumber:
+          ep.mal_id || 0,
+      }));
+
+    await setSupabaseCache(
+      "anime_episodes",
+      cacheKey,
+      finalEpisodes,
+      TTL.EPISODES
+    );
+
+    return finalEpisodes;
+  } catch (error) {
+    console.log(
+      "Episode error:",
+      error?.response?.status || error.message
+    );
+
+    return [];
+  }
 }
 
-function mergeAniListAndJikan(anilistData, jikanData) {
-  if (!anilistData && !jikanData) return null;
+async function getHomeData() {
+  try {
+    const cached = await getSupabaseCache(
+      "home_cache",
+      "home-main"
+    );
 
-  if (!anilistData) return jikanData;
-  if (!jikanData) return anilistData;
+    if (cached?.fresh) {
+      console.log("✅ HOME CACHE HIT");
+      return cached.data;
+    }
 
-  return {
-    ...anilistData,
+    const query = `
+      query {
+        trending: Page(page: 1, perPage: 12) {
+          media(
+            type: ANIME,
+            sort: TRENDING_DESC,
+            ${SAFE_FILTER}
+          ) {
+            ${MEDIA_FIELDS}
+          }
+        }
 
-    malId: anilistData.malId || jikanData.malId,
+        popular: Page(page: 1, perPage: 12) {
+          media(
+            type: ANIME,
+            sort: POPULARITY_DESC,
+            ${SAFE_FILTER}
+          ) {
+            ${MEDIA_FIELDS}
+          }
+        }
 
-    title: anilistData.title || jikanData.title,
-    name: anilistData.name || jikanData.name,
+        airing: Page(page: 1, perPage: 12) {
+          media(
+            type: ANIME,
+            status: RELEASING,
+            sort: POPULARITY_DESC,
+            ${SAFE_FILTER}
+          ) {
+            ${MEDIA_FIELDS}
+          }
+        }
 
-    poster: anilistData.poster || jikanData.poster,
-    image: anilistData.image || jikanData.image,
-    banner: anilistData.banner || jikanData.banner,
-    bannerImage: anilistData.bannerImage || jikanData.bannerImage,
+        latest: Page(page: 1, perPage: 20) {
+          media(
+            type: ANIME,
+            sort: START_DATE_DESC,
+            ${SAFE_FILTER}
+          ) {
+            ${MEDIA_FIELDS}
+          }
+        }
+      }
+    `;
 
-    description:
-      jikanData.synopsis ||
-      anilistData.description ||
-      "No description available.",
+    const data = await anilist(query);
 
-    synopsis:
-      jikanData.synopsis ||
-      anilistData.synopsis ||
-      "No description available.",
+    const finalData = {
+      spotlights: safeAnimeList(
+        data?.trending?.media || []
+      ),
 
-    type: anilistData.type || jikanData.type,
-    format: anilistData.format || jikanData.format,
-    episodes: anilistData.episodes || jikanData.episodes,
-    totalEpisodes: anilistData.totalEpisodes || jikanData.totalEpisodes,
-    status: anilistData.status || jikanData.status,
-    year: anilistData.year || jikanData.year,
-    season: anilistData.season || jikanData.season,
+      trending: safeAnimeList(
+        data?.trending?.media || []
+      ),
 
-    genres:
-      anilistData.genres?.length > 0
-        ? anilistData.genres
-        : jikanData.genres || [],
+      top_airing: safeAnimeList(
+        data?.airing?.media || []
+      ),
 
-    score: jikanData.score || anilistData.score,
-    malScore: jikanData.score,
-    rank: jikanData.rank,
-    popularity: jikanData.popularity || anilistData.popularity,
-    members: jikanData.members,
-    favorites: jikanData.favorites || anilistData.favorites,
+      most_popular: safeAnimeList(
+        data?.popular?.media || []
+      ),
 
-    trailer: jikanData.trailer,
-    duration: jikanData.duration,
-    rating: jikanData.rating,
-    studios: jikanData.studios || anilistData.studios || [],
-    producers: jikanData.producers || [],
-    licensors: jikanData.licensors || [],
-    aired: jikanData.aired,
-    broadcast: jikanData.broadcast,
-    background: jikanData.background,
+      latest_episode: safeAnimeList(
+        data?.latest?.media || []
+      ),
 
-    jikan: jikanData,
-  };
+      recently_added: safeAnimeList(
+        data?.latest?.media || []
+      ),
+
+      latest_completed: [],
+
+      most_favorite: safeAnimeList(
+        data?.popular?.media || []
+      ),
+
+      top_upcoming: [],
+
+      todaySchedule: [],
+      genres: [],
+      topten: [],
+    };
+
+    await setSupabaseCache(
+      "home_cache",
+      "home-main",
+      finalData,
+      TTL.HOME
+    );
+
+    return finalData;
+  } catch (error) {
+    console.log(
+      "Home error:",
+      error?.response?.status || error.message
+    );
+
+    return {
+      spotlights: [],
+      trending: [],
+      top_airing: [],
+      most_popular: [],
+      latest_episode: [],
+      recently_added: [],
+      latest_completed: [],
+      most_favorite: [],
+      top_upcoming: [],
+      todaySchedule: [],
+      genres: [],
+      topten: [],
+    };
+  }
 }
 
-function sortSearchResults(results, keyword) {
-  const q = keyword.toLowerCase();
+async function resolveMegaPlay(
+  anilistId,
+  ep,
+  lang = "sub"
+) {
+  try {
+    const embed = `${MEGAPLAY}/stream/ani/${anilistId}/${ep}/${lang}`;
 
-  return results.sort((a, b) => {
-    const aExact =
-      a.title?.toLowerCase() === q ||
-      a.name?.toLowerCase() === q ||
-      a.titleEnglish?.toLowerCase() === q;
+    const response = await axios.get(embed, {
+      timeout: 15000,
+      validateStatus: () => true,
+    });
 
-    const bExact =
-      b.title?.toLowerCase() === q ||
-      b.name?.toLowerCase() === q ||
-      b.titleEnglish?.toLowerCase() === q;
+    if (
+      response.status === 200 &&
+      response.data
+    ) {
+      return {
+        source: "megaplay",
+        success: true,
+        embed,
+      };
+    }
 
-    if (aExact && !bExact) return -1;
-    if (!aExact && bExact) return 1;
-
-    const aTv = a.type === "TV" || a.format === "TV";
-    const bTv = b.type === "TV" || b.format === "TV";
-
-    if (aTv && !bTv) return -1;
-    if (!aTv && bTv) return 1;
-
-    return (b.members || b.popularity || 0) - (a.members || a.popularity || 0);
-  });
+    return null;
+  } catch {
+    return null;
+  }
 }
 
-/* ===============================
-   BASIC
-================================ */
+async function searchAnikotoSeries(
+  animeTitle
+) {
+  try {
+    const cacheKey = `anikoto-${animeTitle}`;
+
+    const cached = await getSupabaseCache(
+      "stream_cache",
+      cacheKey
+    );
+
+    if (cached?.fresh) {
+      return cached.data;
+    }
+
+    const response = await axios.get(
+      `${ANIKOTO}/recent-anime?page=1&per_page=100`,
+      {
+        timeout: 20000,
+      }
+    );
+
+    const rows =
+      response.data?.results || [];
+
+    const found = rows.find((anime) =>
+      anime.title
+        ?.toLowerCase()
+        .includes(
+          animeTitle.toLowerCase()
+        )
+    );
+
+    if (!found) return null;
+
+    await setSupabaseCache(
+      "stream_cache",
+      cacheKey,
+      found,
+      TTL.ANIKOTO_MAP
+    );
+
+    return found;
+  } catch (error) {
+    console.log(
+      "Anikoto search fail:",
+      error.message
+    );
+
+    return null;
+  }
+}
+
+async function resolveAnikoto(
+  animeTitle,
+  episode,
+  lang = "sub"
+) {
+  try {
+    const series =
+      await searchAnikotoSeries(
+        animeTitle
+      );
+
+    if (!series?.id) {
+      return null;
+    }
+
+    const response = await axios.get(
+      `${ANIKOTO}/series/${series.id}`,
+      {
+        timeout: 20000,
+      }
+    );
+
+    const episodes =
+      response.data?.episodes || [];
+
+    const foundEpisode =
+      episodes.find(
+        (ep) =>
+          Number(ep.number) ===
+          Number(episode)
+      );
+
+    if (!foundEpisode) {
+      return null;
+    }
+
+    const embedId =
+      foundEpisode.embed_id;
+
+    if (!embedId) {
+      return null;
+    }
+
+    const embed = `${MEGAPLAY}/stream/s-2/${embedId}/${lang}`;
+
+    return {
+      source: "anikoto",
+      success: true,
+      embed,
+      episodeData: foundEpisode,
+    };
+  } catch (error) {
+    console.log(
+      "Anikoto resolve fail:",
+      error.message
+    );
+
+    return null;
+  }
+}
+
+async function resolveStream(
+  anilistId,
+  ep,
+  lang = "sub"
+) {
+  try {
+    const cacheKey = `stream-${anilistId}-${ep}-${lang}`;
+
+    const cached = await getSupabaseCache(
+      "stream_cache",
+      cacheKey
+    );
+
+    if (cached?.fresh) {
+      return cached.data;
+    }
+
+    const details =
+      await getAnimeDetails(anilistId);
+
+    if (!details) {
+      return {
+        success: false,
+      };
+    }
+
+    const mega =
+      await resolveMegaPlay(
+        anilistId,
+        ep,
+        lang
+      );
+
+    if (mega?.success) {
+      await setSupabaseCache(
+        "stream_cache",
+        cacheKey,
+        mega,
+        TTL.STREAM
+      );
+
+      return mega;
+    }
+
+    console.log(
+      "⚠️ MegaPlay failed, switching to Anikoto..."
+    );
+
+    const anikoto =
+      await resolveAnikoto(
+        details.title,
+        ep,
+        lang
+      );
+
+    if (anikoto?.success) {
+      await setSupabaseCache(
+        "stream_cache",
+        cacheKey,
+        anikoto,
+        TTL.STREAM
+      );
+
+      return anikoto;
+    }
+
+    return {
+      success: false,
+    };
+  } catch (error) {
+    console.log(
+      "Resolve stream error:",
+      error.message
+    );
+
+    return {
+      success: false,
+    };
+  }
+}
 
 app.get("/", (req, res) => {
   res.send("🔥 OFFANIME Smart Hybrid API Running");
@@ -524,164 +1038,26 @@ app.get("/", (req, res) => {
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
-    mode: "smart-hybrid-anilist-jikan-mal",
+    mode: "smart-hybrid-anilist-jikan-megaplay-anikoto",
     uptime: process.uptime(),
     time: Date.now(),
   });
 });
 
 /* ===============================
-   SMART ROUTES
+   HOME
 ================================ */
 
-app.get("/api/smart/anilist-to-mal/:id", async (req, res) => {
-  try {
-    const result = await anilistToMal(req.params.id);
-
-    if (!result?.malId) {
-      return res.status(404).json({
-        status: "error",
-        error: "MAL ID not found",
-      });
-    }
-
-    res.json({
-      status: "ok",
-      ...result,
-    });
-  } catch (err) {
-    res.status(500).json({
-      status: "error",
-      error: "Failed to convert AniList ID to MAL ID",
-      debug: err.message,
-    });
-  }
+app.get("/api/home", async (req, res) => {
+  const data = await getHomeData();
+  res.json(data);
 });
 
-app.get("/api/smart/mal-to-anilist/:malId", async (req, res) => {
-  try {
-    const result = await malToAnilist(req.params.malId);
+/* ===============================
+   SEARCH
+================================ */
 
-    if (!result?.id) {
-      return res.status(404).json({
-        status: "error",
-        error: "AniList ID not found",
-      });
-    }
-
-    res.json({
-      status: "ok",
-      data: result,
-    });
-  } catch (err) {
-    res.status(500).json({
-      status: "error",
-      error: "Failed to convert MAL ID to AniList ID",
-      debug: err.message,
-    });
-  }
-});
-
-app.get("/api/smart/details/:id", async (req, res) => {
-  const id = Number(req.params.id);
-
-  try {
-    const cacheKey = `smart-details-${id}`;
-    const cached = await getSupabaseCache("anime_details", cacheKey);
-
-    if (cached?.fresh) {
-      return res.json({
-        status: "ok",
-        source: "cache",
-        data: cached.data,
-      });
-    }
-
-    let anilistData = null;
-    let jikanData = null;
-
-    try {
-      const query = `
-        query ($id: Int) {
-          Media(id: $id, type: ANIME) {
-            ${MEDIA_FIELDS}
-            popularity
-            favourites
-            studios {
-              nodes {
-                name
-              }
-            }
-          }
-        }
-      `;
-
-      const data = await anilist(query, { id });
-      const media = data?.Media;
-
-      if (media) {
-        anilistData = normalizeAnime(media);
-        anilistData.studios = media.studios?.nodes?.map((s) => s.name) || [];
-        anilistData.popularity = media.popularity || 0;
-        anilistData.favorites = media.favourites || 0;
-      }
-    } catch (err) {
-      console.log("Smart details AniList failed:", err?.response?.status || err.message);
-    }
-
-    let malId = anilistData?.malId || null;
-
-    if (!malId) {
-      try {
-        const mapped = await anilistToMal(id);
-        malId = mapped?.malId || null;
-      } catch {}
-    }
-
-    if (malId) {
-      try {
-        jikanData = await getJikanDetailsByMal(malId);
-      } catch (err) {
-        console.log("Smart details Jikan failed:", err?.response?.status || err.message);
-      }
-    }
-
-    const merged = mergeAniListAndJikan(anilistData, jikanData);
-
-    if (!merged) {
-      return res.status(404).json({
-        status: "error",
-        error: "Anime not found from AniList or Jikan",
-      });
-    }
-
-    await setSupabaseCache("anime_details", cacheKey, merged, TTL.DETAILS);
-
-    res.json({
-      status: "ok",
-      source: "smart-hybrid",
-      data: merged,
-    });
-  } catch (err) {
-    const fallback = await getSupabaseCache("anime_details", `smart-details-${id}`);
-
-    if (fallback?.data) {
-      return res.json({
-        status: "ok",
-        source: "stale-cache",
-        data: fallback.data,
-      });
-    }
-
-    res.status(500).json({
-      status: "error",
-      error: "Smart details failed",
-      debug: err.message,
-    });
-  }
-});
-
-app.get("/api/smart/search", async (req, res) => {
+app.get("/api/search", async (req, res) => {
   const keyword = String(req.query.keyword || req.query.q || "").trim();
 
   if (!keyword) {
@@ -692,7 +1068,7 @@ app.get("/api/smart/search", async (req, res) => {
     });
   }
 
-  const cacheKey = `smart-search-${keyword.toLowerCase()}`;
+  const cacheKey = `search-${keyword.toLowerCase()}`;
 
   try {
     const cached = await getSupabaseCache("search_cache", cacheKey);
@@ -705,92 +1081,21 @@ app.get("/api/smart/search", async (req, res) => {
       });
     }
 
-    let results = [];
+    let results = await searchAniList(keyword);
 
-    try {
-      const query = `
-        query ($search: String) {
-          Page(page: 1, perPage: 18) {
-            media(
-              search: $search,
-              type: ANIME,
-              ${SAFE_FILTER}
-            ) {
-              ${MEDIA_FIELDS}
-              popularity
-              favourites
-            }
-          }
-        }
-      `;
-
-      const data = await anilist(query, { search: keyword });
-      results = safeAnimeList(data?.Page?.media || []);
-
-      if (results.length > 0) {
-        const responseResults = sortSearchResults(results, keyword);
-
-        await setSupabaseCache("search_cache", cacheKey, responseResults, TTL.SEARCH);
-
-        return res.json({
-          status: "ok",
-          source: "anilist",
-          results: responseResults,
-        });
-      }
-    } catch (err) {
-      console.log("Smart search AniList failed:", err?.response?.status || err.message);
+    if (!results.length) {
+      results = await searchJikan(keyword);
     }
 
-    const jikanJson = await jikanGet("/anime", {
-      q: keyword,
-      limit: 10,
-      sfw: true,
-    });
-
-    const jikanResults = (jikanJson?.data || [])
-      .map(cleanJikanAnime)
-      .filter(Boolean);
-
-    const converted = [];
-
-    for (const item of jikanResults) {
-      try {
-        await sleep(350);
-
-        const anilistItem = await malToAnilist(item.malId);
-
-        if (anilistItem?.id) {
-          converted.push({
-            ...anilistItem,
-            malId: item.malId,
-            title: anilistItem.title || item.title,
-            name: anilistItem.name || item.name,
-            poster: anilistItem.poster || item.poster,
-            image: anilistItem.image || item.image,
-            banner: anilistItem.banner || item.banner,
-            bannerImage: anilistItem.bannerImage || item.bannerImage,
-            score: item.score || anilistItem.score,
-            members: item.members,
-            source: "jikan-converted",
-          });
-        }
-      } catch (err) {
-        console.log("MAL -> AniList conversion failed:", item.malId);
-      }
-    }
-
-    const finalResults = sortSearchResults(converted, keyword);
-
-    await setSupabaseCache("search_cache", cacheKey, finalResults, TTL.SEARCH);
+    await setSupabaseCache("search_cache", cacheKey, results, TTL.SEARCH);
 
     res.json({
       status: "ok",
-      source: "jikan-fallback-converted",
-      results: finalResults,
+      source: results.length ? "smart-search" : "empty",
+      results,
     });
-  } catch (err) {
-    console.error("Smart search failed:", err?.response?.status || err.message);
+  } catch (error) {
+    console.log("Search error:", error?.response?.status || error.message);
 
     const fallback = await getSupabaseCache("search_cache", cacheKey);
 
@@ -811,7 +1116,122 @@ app.get("/api/smart/search", async (req, res) => {
 });
 
 /* ===============================
-   JIKAN ROUTES
+   DETAILS
+================================ */
+
+app.get("/api/details/:id", async (req, res) => {
+  const id = Number(req.params.id);
+
+  if (!id) {
+    return res.status(400).json({
+      status: "error",
+      error: "Invalid anime ID",
+    });
+  }
+
+  const data = await getAnimeDetails(id);
+
+  if (!data) {
+    return res.status(404).json({
+      status: "error",
+      error: "Anime not found",
+    });
+  }
+
+  res.json(data);
+});
+
+app.get("/api/smart/details/:id", async (req, res) => {
+  const id = Number(req.params.id);
+
+  if (!id) {
+    return res.status(400).json({
+      status: "error",
+      error: "Invalid anime ID",
+    });
+  }
+
+  const data = await getAnimeDetails(id);
+
+  if (!data) {
+    return res.status(404).json({
+      status: "error",
+      error: "Anime not found",
+    });
+  }
+
+  res.json({
+    status: "ok",
+    source: "smart-hybrid",
+    data,
+  });
+});
+
+/* ===============================
+   EPISODES
+================================ */
+
+app.get("/api/episodes/:id", async (req, res) => {
+  const id = Number(req.params.id);
+
+  if (!id) {
+    return res.status(400).json({
+      status: "error",
+      results: [],
+    });
+  }
+
+  const episodes = await getAnimeEpisodes(id);
+
+  res.json({
+    status: "ok",
+    results: episodes,
+  });
+});
+
+/* ===============================
+   STREAM RESOLVER
+================================ */
+
+app.get("/api/stream/resolve/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const ep = Number(req.query.ep || 1);
+  const lang = String(req.query.lang || "sub").toLowerCase() === "dub" ? "dub" : "sub";
+
+  if (!id || !ep) {
+    return res.status(400).json({
+      status: "error",
+      error: "Missing anime ID or episode",
+    });
+  }
+
+  try {
+    const stream = await resolveStream(id, ep, lang);
+
+    if (!stream?.success) {
+      return res.status(404).json({
+        status: "error",
+        error: "Stream not found",
+      });
+    }
+
+    res.json({
+      status: "ok",
+      ...stream,
+      url: stream.embed,
+      provider: stream.source,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: "error",
+      error: "Stream resolve failed",
+      debug: error.message,
+    });
+  }
+});
+
+/* ===============================
+   JIKAN
 ================================ */
 
 app.get("/api/jikan/anime/:malId", async (req, res) => {
@@ -825,101 +1245,18 @@ app.get("/api/jikan/anime/:malId", async (req, res) => {
   }
 
   try {
-    const data = await getJikanDetailsByMal(malId);
-
-    if (!data) {
-      return res.status(404).json({
-        status: "error",
-        error: "Anime not found from Jikan",
-      });
-    }
+    const data = await jikanGet(`/anime/${malId}/full`);
 
     res.json({
       status: "ok",
       source: "jikan",
-      data,
+      data: cleanJikanAnime(data?.data),
     });
-  } catch (err) {
-    console.error("Jikan anime error:", err?.response?.status || err.message);
-
-    const fallback = await getSupabaseCache("anime_details", `jikan-anime-${malId}`);
-
-    if (fallback?.data) {
-      return res.json({
-        status: "ok",
-        source: "stale-cache",
-        data: fallback.data,
-      });
-    }
-
+  } catch (error) {
     res.status(500).json({
       status: "error",
-      error: "Failed to fetch Jikan anime",
-      debug: err.message,
-    });
-  }
-});
-
-app.get("/api/jikan/search", async (req, res) => {
-  const keyword = String(req.query.q || req.query.keyword || "").trim();
-
-  if (!keyword) {
-    return res.status(400).json({
-      status: "error",
-      error: "Missing search query",
-    });
-  }
-
-  try {
-    const cacheKey = `jikan-search-${keyword.toLowerCase()}`;
-    const cached = await getSupabaseCache("search_cache", cacheKey);
-
-    if (cached?.fresh) {
-      return res.json({
-        status: "ok",
-        source: "cache",
-        results: cached.data,
-      });
-    }
-
-    const json = await jikanGet("/anime", {
-      q: keyword,
-      limit: 10,
-      sfw: true,
-    });
-
-    const results = sortSearchResults(
-      (json.data || []).map(cleanJikanAnime).filter(Boolean),
-      keyword
-    );
-
-    await setSupabaseCache("search_cache", cacheKey, results, TTL.JIKAN_SEARCH);
-
-    res.json({
-      status: "ok",
-      source: "jikan",
-      results,
-    });
-  } catch (err) {
-    console.error("Jikan search error:", err?.response?.status || err.message);
-
-    const fallback = await getSupabaseCache(
-      "search_cache",
-      `jikan-search-${keyword.toLowerCase()}`
-    );
-
-    if (fallback?.data) {
-      return res.json({
-        status: "ok",
-        source: "stale-cache",
-        results: fallback.data,
-      });
-    }
-
-    res.status(500).json({
-      status: "error",
-      error: "Failed to search Jikan",
-      debug: err.message,
+      error: "Jikan anime failed",
+      debug: error.message,
     });
   }
 });
@@ -935,347 +1272,50 @@ app.get("/api/jikan/from-anilist/:id", async (req, res) => {
   }
 
   try {
-    const cacheKey = `jikan-from-anilist-${id}`;
-    const cached = await getSupabaseCache("anime_details", cacheKey);
+    const details = await getAnimeDetails(id);
 
-    if (cached?.fresh) {
-      return res.json({
-        status: "ok",
-        source: "cache",
-        data: cached.data,
-      });
-    }
-
-    const mapped = await anilistToMal(id);
-
-    if (!mapped?.malId) {
+    if (!details?.malId) {
       return res.status(404).json({
         status: "error",
         error: "MAL ID not found",
       });
     }
 
-    const data = await getJikanDetailsByMal(mapped.malId);
-
-    await setSupabaseCache("anime_details", cacheKey, data, TTL.JIKAN_DETAILS);
+    const data = await jikanGet(`/anime/${details.malId}/full`);
 
     res.json({
       status: "ok",
       source: "jikan-from-anilist",
       anilistId: id,
-      malId: mapped.malId,
-      data,
+      malId: details.malId,
+      data: cleanJikanAnime(data?.data),
     });
-  } catch (err) {
-    console.error("Jikan from AniList error:", err?.response?.status || err.message);
-
-    const fallback = await getSupabaseCache("anime_details", `jikan-from-anilist-${id}`);
-
-    if (fallback?.data) {
-      return res.json({
-        status: "ok",
-        source: "stale-cache",
-        data: fallback.data,
-      });
-    }
-
+  } catch (error) {
     res.status(500).json({
       status: "error",
-      error: "Failed to fetch Jikan data from AniList ID",
-      debug: err.message,
+      error: "Jikan from AniList failed",
+      debug: error.message,
     });
   }
 });
 
 /* ===============================
-   EXISTING ROUTES — NOW SMARTER
+   RECOMMENDATIONS
 ================================ */
-
-app.get("/api/home", async (req, res) => {
-  try {
-    const cached = await getSupabaseCache("home_cache", "main");
-
-    if (cached?.fresh) {
-      console.log("✅ HOME CACHE HIT");
-      return res.json(cached.data);
-    }
-
-    console.log("❌ FETCHING FRESH HOME");
-
-    const query = `
-      query {
-        trending: Page(page: 1, perPage: 12) {
-          media(sort: TRENDING_DESC, type: ANIME, ${SAFE_FILTER}) {
-            ${MEDIA_FIELDS}
-          }
-        }
-
-        latest: Page(page: 1, perPage: 18) {
-          media(sort: UPDATED_AT_DESC, type: ANIME, status_in: [RELEASING], ${SAFE_FILTER}) {
-            ${MEDIA_FIELDS}
-          }
-        }
-
-        topAiring: Page(page: 1, perPage: 12) {
-          media(sort: SCORE_DESC, type: ANIME, status: RELEASING, format_in: [TV, ONA], ${SAFE_FILTER}) {
-            ${MEDIA_FIELDS}
-          }
-        }
-
-        mostFavorite: Page(page: 1, perPage: 12) {
-          media(sort: FAVOURITES_DESC, type: ANIME, ${SAFE_FILTER}) {
-            ${MEDIA_FIELDS}
-          }
-        }
-
-        latestCompleted: Page(page: 1, perPage: 12) {
-          media(sort: END_DATE_DESC, type: ANIME, status: FINISHED, ${SAFE_FILTER}) {
-            ${MEDIA_FIELDS}
-          }
-        }
-      }
-    `;
-
-    const result = await anilist(query);
-
-    const response = {
-      status: "ok",
-      spotlight: safeAnimeList(result.trending.media).slice(0, 6),
-      trending: safeAnimeList(result.trending.media),
-      latest_episode: safeAnimeList(result.latest.media).slice(0, 12),
-      top_airing: safeAnimeList(result.topAiring.media),
-      most_favorite: safeAnimeList(result.mostFavorite.media),
-      latest_completed: safeAnimeList(result.latestCompleted.media),
-    };
-
-    await setSupabaseCache("home_cache", "main", response, TTL.HOME);
-
-    res.json(response);
-  } catch (err) {
-    console.error("Home error:", err?.response?.status || err.message);
-
-    const fallback = await getSupabaseCache("home_cache", "main");
-
-    if (fallback?.data) return res.json(fallback.data);
-
-    res.status(500).json({
-      status: "error",
-      results: null,
-    });
-  }
-});
-
-app.get("/api/details/:id", async (req, res) => {
-  const id = Number(req.params.id);
-
-  try {
-    const cached = await getSupabaseCache("anime_details", id);
-
-    if (cached?.fresh) return res.json(cached.data);
-
-    const query = `
-      query ($id: Int) {
-        Media(id: $id, type: ANIME) {
-          ${MEDIA_FIELDS}
-          popularity
-          favourites
-          studios {
-            nodes {
-              name
-            }
-          }
-        }
-      }
-    `;
-
-    const data = await anilist(query, { id });
-    const media = data?.Media;
-
-    if (!media) throw new Error("AniList anime not found");
-
-    const anime = normalizeAnime(media);
-    anime.studios = media.studios?.nodes?.map((s) => s.name) || [];
-    anime.popularity = media.popularity || 0;
-    anime.favorites = media.favourites || 0;
-
-    await setSupabaseCache("anime_details", id, anime, TTL.DETAILS);
-
-    res.json(anime);
-  } catch (err) {
-    console.error("Details error:", err?.response?.status || err.message);
-
-    const fallback = await getSupabaseCache("anime_details", id);
-
-    if (fallback?.data) return res.json(fallback.data);
-
-    res.status(500).json({
-      title: "Anime",
-      error: "Details failed",
-    });
-  }
-});
-
-app.get("/api/episodes/:id", async (req, res) => {
-  const id = Number(req.params.id);
-
-  try {
-    const cached = await getSupabaseCache("anime_episodes", id);
-
-    if (cached?.fresh) return res.json(cached.data);
-
-    const query = `
-      query ($id: Int) {
-        Media(id: $id, type: ANIME) {
-          id
-          episodes
-          status
-          nextAiringEpisode {
-            episode
-          }
-          title {
-            romaji
-            english
-          }
-        }
-      }
-    `;
-
-    const data = await anilist(query, { id });
-    const anime = data?.Media;
-
-    if (!anime) throw new Error("Anime not found");
-
-    let totalEpisodes = 0;
-
-    if (anime.status === "RELEASING" && anime.nextAiringEpisode?.episode) {
-      totalEpisodes = anime.nextAiringEpisode.episode - 1;
-    } else if (anime.episodes) {
-      totalEpisodes = anime.episodes;
-    }
-
-    const episodes = Array.from({ length: totalEpisodes }, (_, index) => {
-      const ep = index + 1;
-
-      return {
-        id: `${anime.id}-${ep}`,
-        number: ep,
-        episode: ep,
-        episodeId: ep,
-        title: `Episode ${ep}`,
-        image: "",
-        thumbnail: "",
-        url: `/watch/${anime.id}?ep=${ep}`,
-      };
-    });
-
-    const response = {
-      status: "ok",
-      results: episodes,
-    };
-
-    await setSupabaseCache("anime_episodes", id, response, TTL.EPISODES);
-
-    res.json(response);
-  } catch (err) {
-    console.error("Episodes error:", err?.response?.status || err.message);
-
-    const fallback = await getSupabaseCache("anime_episodes", id);
-
-    if (fallback?.data) return res.json(fallback.data);
-
-    res.json({
-      status: "ok",
-      results: [],
-    });
-  }
-});
-
-app.get("/api/characters/:id", async (req, res) => {
-  const id = Number(req.params.id);
-
-  try {
-    const cached = await getSupabaseCache("anime_characters", id);
-
-    if (cached?.fresh) return res.json(cached.data);
-
-    const query = `
-      query ($id: Int) {
-        Media(id: $id, type: ANIME) {
-          characters(page: 1, perPage: 20) {
-            edges {
-              role
-              node {
-                id
-                name {
-                  full
-                }
-                image {
-                  large
-                }
-              }
-              voiceActors(language: JAPANESE) {
-                id
-                name {
-                  full
-                }
-                image {
-                  large
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    const data = await anilist(query, { id });
-
-    const results =
-      data?.Media?.characters?.edges?.map((edge) => ({
-        role: edge.role,
-        character: {
-          id: edge.node.id,
-          name: edge.node.name.full,
-          image: edge.node.image?.large,
-        },
-        voiceActor: edge.voiceActors?.[0]
-          ? {
-              id: edge.voiceActors[0].id,
-              name: edge.voiceActors[0].name.full,
-              image: edge.voiceActors[0].image?.large,
-            }
-          : null,
-      })) || [];
-
-    const response = {
-      status: "ok",
-      results,
-    };
-
-    await setSupabaseCache("anime_characters", id, response, TTL.CHARACTERS);
-
-    res.json(response);
-  } catch (err) {
-    console.error("Characters error:", err?.response?.status || err.message);
-
-    const fallback = await getSupabaseCache("anime_characters", id);
-
-    if (fallback?.data) return res.json(fallback.data);
-
-    res.json({
-      status: "ok",
-      results: [],
-    });
-  }
-});
 
 app.get("/api/recommendations/:id", async (req, res) => {
   const id = Number(req.params.id);
 
   try {
-    const cached = await getSupabaseCache("anime_recommendations", id);
+    const cacheKey = `recommendations-${id}`;
+    const cached = await getSupabaseCache("anime_recommendations", cacheKey);
 
-    if (cached?.fresh) return res.json(cached.data);
+    if (cached?.fresh) {
+      return res.json({
+        status: "ok",
+        results: cached.data,
+      });
+    }
 
     const query = `
       query ($id: Int) {
@@ -1297,21 +1337,18 @@ app.get("/api/recommendations/:id", async (req, res) => {
       data?.Media?.recommendations?.nodes?.map((item) => item.mediaRecommendation) || []
     );
 
-    const response = {
+    await setSupabaseCache(
+      "anime_recommendations",
+      cacheKey,
+      results,
+      TTL.RECOMMENDATIONS
+    );
+
+    res.json({
       status: "ok",
       results,
-    };
-
-    await setSupabaseCache("anime_recommendations", id, response, TTL.RECOMMENDATIONS);
-
-    res.json(response);
-  } catch (err) {
-    console.error("Recommendations error:", err?.response?.status || err.message);
-
-    const fallback = await getSupabaseCache("anime_recommendations", id);
-
-    if (fallback?.data) return res.json(fallback.data);
-
+    });
+  } catch (error) {
     res.json({
       status: "ok",
       results: [],
@@ -1319,70 +1356,23 @@ app.get("/api/recommendations/:id", async (req, res) => {
   }
 });
 
-app.get("/api/search", async (req, res) => {
-  const keyword = String(req.query.keyword || req.query.q || "").trim();
-
-  if (!keyword) {
-    return res.json({
-      status: "ok",
-      results: [],
-    });
-  }
-
-  const searchKey = keyword.toLowerCase();
-
-  try {
-    const cached = await getSupabaseCache("search_cache", `anilist-search-${searchKey}`);
-
-    if (cached?.fresh) return res.json(cached.data);
-
-    const query = `
-      query ($search: String) {
-        Page(page: 1, perPage: 18) {
-          media(search: $search, type: ANIME, ${SAFE_FILTER}) {
-            ${MEDIA_FIELDS}
-          }
-        }
-      }
-    `;
-
-    const data = await anilist(query, { search: keyword });
-
-    let results = safeAnimeList(data?.Page?.media || []);
-
-    if (!results.length) {
-      const smartCache = await getSupabaseCache("search_cache", `smart-search-${searchKey}`);
-      if (smartCache?.data) results = smartCache.data;
-    }
-
-    const response = {
-      status: "ok",
-      source: "anilist",
-      results,
-    };
-
-    await setSupabaseCache("search_cache", `anilist-search-${searchKey}`, response, TTL.SEARCH);
-
-    res.json(response);
-  } catch (err) {
-    console.error("Search error:", err?.response?.status || err.message);
-
-    const fallback = await getSupabaseCache("search_cache", `anilist-search-${searchKey}`);
-
-    if (fallback?.data) return res.json(fallback.data);
-
-    req.url = `/api/smart/search?keyword=${encodeURIComponent(keyword)}`;
-    app.handle(req, res);
-  }
-});
+/* ===============================
+   SEASONS / RELATIONS
+================================ */
 
 app.get("/api/seasons/:id", async (req, res) => {
   const id = Number(req.params.id);
 
   try {
-    const cached = await getSupabaseCache("anime_seasons", id);
+    const cacheKey = `seasons-${id}`;
+    const cached = await getSupabaseCache("anime_seasons", cacheKey);
 
-    if (cached?.fresh) return res.json(cached.data);
+    if (cached?.fresh) {
+      return res.json({
+        status: "ok",
+        results: cached.data,
+      });
+    }
 
     const query = `
       query ($id: Int) {
@@ -1401,26 +1391,19 @@ app.get("/api/seasons/:id", async (req, res) => {
 
     const data = await anilist(query, { id });
 
-    const related =
+    const results = safeAnimeList(
       data?.Media?.relations?.edges
-        ?.filter((edge) => ["SEQUEL", "PREQUEL"].includes(edge.relationType))
-        ?.map((edge) => edge.node) || [];
+        ?.filter((edge) => ["SEQUEL", "PREQUEL", "SIDE_STORY", "SPIN_OFF"].includes(edge.relationType))
+        ?.map((edge) => edge.node) || []
+    );
 
-    const response = {
+    await setSupabaseCache("anime_seasons", cacheKey, results, TTL.SEASONS);
+
+    res.json({
       status: "ok",
-      results: safeAnimeList(related),
-    };
-
-    await setSupabaseCache("anime_seasons", id, response, TTL.SEASONS);
-
-    res.json(response);
-  } catch (err) {
-    console.error("Seasons error:", err?.response?.status || err.message);
-
-    const fallback = await getSupabaseCache("anime_seasons", id);
-
-    if (fallback?.data) return res.json(fallback.data);
-
+      results,
+    });
+  } catch (error) {
     res.json({
       status: "ok",
       results: [],
@@ -1428,125 +1411,20 @@ app.get("/api/seasons/:id", async (req, res) => {
   }
 });
 
-app.get("/api/schedule", async (req, res) => {
-  try {
-    const date = req.query.date;
-
-    if (!date) {
-      return res.json({
-        status: "ok",
-        results: [],
-      });
-    }
-
-    const query = `
-      query ($page: Int, $airingAtGreater: Int, $airingAtLesser: Int) {
-        Page(page: $page, perPage: 50) {
-          airingSchedules(
-            airingAt_greater: $airingAtGreater,
-            airingAt_lesser: $airingAtLesser,
-            sort: TIME
-          ) {
-            airingAt
-            episode
-            media {
-              ${MEDIA_FIELDS}
-            }
-          }
-        }
-      }
-    `;
-
-    const start = Math.floor(new Date(`${date}T00:00:00+05:30`).getTime() / 1000);
-    const end = Math.floor(new Date(`${date}T23:59:59+05:30`).getTime() / 1000);
-
-    const data = await anilist(query, {
-      page: 1,
-      airingAtGreater: start,
-      airingAtLesser: end,
-    });
-
-    const results =
-      data?.Page?.airingSchedules
-        ?.filter((item) => item.media && !item.media.isAdult)
-        ?.filter((item) => {
-          const genres = item.media.genres || [];
-          return !genres.includes("Hentai") && !genres.includes("Ecchi");
-        })
-        ?.map((item) => {
-          const anime = normalizeAnime(item.media);
-
-          return {
-            ...anime,
-            airingAt: item.airingAt,
-            time: new Date(item.airingAt * 1000).toLocaleTimeString("en-IN", {
-              hour: "2-digit",
-              minute: "2-digit",
-              hour12: true,
-            }),
-            episode: item.episode,
-            title: anime.title,
-          };
-        }) || [];
-
-    res.json({
-      status: "ok",
-      results,
-    });
-  } catch (err) {
-    console.error("Schedule error:", err?.response?.status || err.message);
-
-    res.status(500).json({
-      error: "Schedule failed",
-      debug: err.message,
-    });
-  }
-});
-
-app.get("/api/top-search", async (req, res) => {
-  try {
-    const query = `
-      query {
-        Page(perPage: 10) {
-          media(sort: TRENDING_DESC, type: ANIME, ${SAFE_FILTER}) {
-            ${MEDIA_FIELDS}
-          }
-        }
-      }
-    `;
-
-    const data = await anilist(query);
-
-    const results = safeAnimeList(data?.Page?.media || []).map((anime, index) => ({
-      rank: index + 1,
-      ...anime,
-    }));
-
-    res.json({
-      status: "ok",
-      results,
-    });
-  } catch (err) {
-    console.error("Top search error:", err?.response?.status || err.message);
-
-    res.status(500).json({
-      error: "Top search failed",
-      debug: err.message,
-    });
-  }
-});
+/* ===============================
+   CATEGORY
+================================ */
 
 app.get("/api/category/:type", async (req, res) => {
-  try {
-    const type = req.params.type;
-    const page = Number(req.query.page || 1);
+  const type = req.params.type;
+  const page = Number(req.query.page || 1);
 
+  try {
     const sortMap = {
-      "recently-added": "ID_DESC",
+      "recently-added": "START_DATE_DESC",
       "top-upcoming": "POPULARITY_DESC",
-      "subbed-anime": "POPULARITY_DESC",
-      "dubbed-anime": "POPULARITY_DESC",
       "most-popular": "POPULARITY_DESC",
+      "top-airing": "POPULARITY_DESC",
       movies: "POPULARITY_DESC",
       "tv-series": "POPULARITY_DESC",
       ovas: "POPULARITY_DESC",
@@ -1571,7 +1449,12 @@ app.get("/api/category/:type", async (req, res) => {
             lastPage
             hasNextPage
           }
-          media(type: ANIME, sort: $sort, format: $format, ${SAFE_FILTER}) {
+          media(
+            type: ANIME,
+            sort: $sort,
+            format: $format,
+            ${SAFE_FILTER}
+          ) {
             ${MEDIA_FIELDS}
           }
         }
@@ -1594,14 +1477,59 @@ app.get("/api/category/:type", async (req, res) => {
         hasNextPage: false,
       },
     });
-  } catch (err) {
-    console.error("Category error:", err?.response?.status || err.message);
-
+  } catch (error) {
     res.status(500).json({
+      status: "error",
       error: "Category failed",
-      debug: err.message,
+      debug: error.message,
     });
   }
+});
+
+/* ===============================
+   TOP SEARCH
+================================ */
+
+app.get("/api/top-search", async (req, res) => {
+  try {
+    const query = `
+      query {
+        Page(page: 1, perPage: 10) {
+          media(type: ANIME, sort: TRENDING_DESC, ${SAFE_FILTER}) {
+            ${MEDIA_FIELDS}
+          }
+        }
+      }
+    `;
+
+    const data = await anilist(query);
+
+    const results = safeAnimeList(data?.Page?.media || []).map((anime, index) => ({
+      rank: index + 1,
+      ...anime,
+    }));
+
+    res.json({
+      status: "ok",
+      results,
+    });
+  } catch (error) {
+    res.json({
+      status: "ok",
+      results: [],
+    });
+  }
+});
+
+/* ===============================
+   SCHEDULE
+================================ */
+
+app.get("/api/schedule", async (req, res) => {
+  res.json({
+    status: "ok",
+    results: [],
+  });
 });
 
 app.listen(PORT, () => {
