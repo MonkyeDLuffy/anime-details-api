@@ -1123,11 +1123,12 @@ app.get("/api/stream/resolve/:id", async (req, res) => {
     const stream = await resolveStream(id, ep, lang);
 
     if (!stream?.success) {
-      return res.status(404).json({
-        status: "error",
-        error: "Stream not found",
-      });
-    }
+  return res.status(404).json({
+    status: "error",
+    error: "Stream not found",
+    ...stream,
+  });
+}
 
     res.json({
       status: "ok",
