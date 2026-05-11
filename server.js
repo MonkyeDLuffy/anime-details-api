@@ -914,11 +914,15 @@ async function resolveStream(anilistId, ep, lang = "sub") {
 
     const details = await getAnimeDetails(anilistId);
 
-    if (!details) {
-      return { success: false };
+    if (!details?.title) {
+      return {
+        success: false,
+        reason: "anime-details-not-found",
+      };
     }
 
-    // ✅ Try Anikoto first because MegaPlay gives fake success pages
+    console.log("🔥 Trying Anikoto only:", details.title, ep, lang);
+
     const anikoto = await resolveAnikoto(details.title, ep, lang);
 
     if (anikoto?.success) {
@@ -926,24 +930,24 @@ async function resolveStream(anilistId, ep, lang = "sub") {
       return anikoto;
     }
 
-    // Backup MegaPlay
-    const mega = await resolveMegaPlay(anilistId, ep, lang);
-
-    if (mega?.success) {
-      await setSupabaseCache("stream_cache", cacheKey, mega, TTL.STREAM);
-      return mega;
-    }
-
-    return { success: false };
+    return {
+      success: false,
+      reason: "anikoto-not-mapped",
+      title: details.title,
+      anilistId,
+      episode: ep,
+      lang,
+    };
   } catch (error) {
     console.log("Resolve stream error:", error.message);
-    return { success: false };
+
+    return {
+      success: false,
+      reason: "resolver-crashed",
+      error: error.message,
+    };
   }
 }
-
-app.get("/", (req, res) => {
-  res.send("🔥 OFFANIME Smart Hybrid API Running");
-});
 
 app.get("/api/health", (req, res) => {
   res.json({
