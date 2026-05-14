@@ -35,6 +35,7 @@ const TTL = {
   ID_MAP: 1000 * 60 * 60 * 24 * 30,
   STREAM: 1000 * 60 * 60 * 24 * 7,
   ANIKOTO_MAP: 1000 * 60 * 60 * 24 * 30,
+  SCHEDULE: 1000 * 60 * 60 * 6,
 };
 
 const MEDIA_FIELDS = `
@@ -1441,10 +1442,142 @@ app.get("/api/top-search", async (req, res) => {
 ================================ */
 
 app.get("/api/schedule", async (req, res) => {
-  res.json({
-    status: "ok",
-    results: [],
-  });
+  const date = String(req.query.date || "").trim();
+
+  if (!date) {
+    return res.json({
+      status: "ok",
+      results: [],
+    });
+  }
+
+  const cacheKey = `schedule-${date}`;
+
+  try {
+    const cached = await getSupabaseCache("schedule_cache", cacheKey);
+
+    if (cached?.fresh) {
+      return res.json({
+        status: "ok",
+        source: "cache",
+        date,
+        results: cached.data,
+      });
+    }
+
+    const start = Math.floor(new Date(`${date}T00:00:00Z`).getTime() / 1000);
+    const end = Math.floor(new Date(`${date}T23:59:59Z`).getTime() / 1000);
+
+    const query = `
+      query ($start: Int, $end: Int) {
+        Page(page: 1, perPage: 50) {
+          airingSchedules(
+            airingAt_greater: $start,
+            airingAt_lesser: $end,
+            sort: TIME
+          ) {
+            id
+            episode
+            airingAt
+            media {
+              id
+              idMal
+              title {
+                romaji
+                english
+                native
+              }
+              coverImage {
+                large
+                extraLarge
+              }
+              bannerImage
+              format
+              episodes
+              isAdult
+              genres
+            }
+          }
+        }
+      }
+    `;
+
+    const data = await anilist(query, {
+      start,
+      end,
+    });
+
+    const results =
+      data?.Page?.airingSchedules
+        ?.filter((item) => item?.media && !item.media.isAdult)
+        ?.filter((item) => {
+          const genres = item.media.genres || [];
+          return !genres.includes("Hentai") && !genres.includes("Ecchi");
+        })
+        ?.map((item) => {
+          const media = item.media;
+
+          const title =
+            media.title?.english ||
+            media.title?.romaji ||
+            media.title?.native ||
+            "Anime";
+
+          return {
+            id: media.id,
+            anilistId: media.id,
+            malId: media.idMal,
+            title,
+            name: title,
+            episode: item.episode,
+            airingAt: item.airingAt,
+            time: new Date(item.airingAt * 1000).toLocaleTimeString("en-IN", {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: true,
+            }),
+            image: media.coverImage?.extraLarge || media.coverImage?.large,
+            poster: media.coverImage?.extraLarge || media.coverImage?.large,
+            banner: media.bannerImage || media.coverImage?.extraLarge,
+            type: media.format || "TV",
+            episodes: media.episodes || "?",
+          };
+        }) || [];
+
+    await setSupabaseCache(
+      "schedule_cache",
+      cacheKey,
+      results,
+      TTL.SCHEDULE
+    );
+
+    res.json({
+      status: "ok",
+      source: "anilist",
+      date,
+      results,
+    });
+  } catch (error) {
+    console.log("Schedule error:", error?.response?.status || error.message);
+
+    const fallback = await getSupabaseCache("schedule_cache", cacheKey);
+
+    if (fallback?.data) {
+      return res.json({
+        status: "ok",
+        source: "stale-cache",
+        date,
+        results: fallback.data,
+      });
+    }
+
+    res.json({
+      status: "ok",
+      source: "failed",
+      date,
+      results: [],
+    });
+  }
 });
 
 app.listen(PORT, () => {
