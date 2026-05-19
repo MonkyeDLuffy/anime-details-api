@@ -25,7 +25,7 @@ const supabase =
 const TTL = {
   HOME: 1000 * 60 * 60 * 4,
   DETAILS: 1000 * 60 * 60 * 24,
-  EPISODES: 1000 * 60 * 60 * 24,
+  EPISODES: 1000 * 60 * 60 * 3,
   SEARCH: 1000 * 60 * 60 * 6,
   CHARACTERS: 1000 * 60 * 60 * 24,
   RECOMMENDATIONS: 1000 * 60 * 60 * 24,
@@ -1096,10 +1096,15 @@ app.get("/api/episodes/:id", async (req, res) => {
     });
   }
 
-  const episodes = await getAnimeEpisodes(id);
+  const forceRefresh =
+    String(req.query.refresh || "").toLowerCase() === "true" ||
+    String(req.query.force || "").toLowerCase() === "true";
+
+  const episodes = await getAnimeEpisodes(id, forceRefresh);
 
   res.json({
     status: "ok",
+    total: episodes.length,
     results: episodes,
   });
 });
