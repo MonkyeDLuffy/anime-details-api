@@ -1100,10 +1100,20 @@ app.get("/api/episodes/:id", async (req, res) => {
     String(req.query.refresh || "").toLowerCase() === "true" ||
     String(req.query.force || "").toLowerCase() === "true";
 
+  if (forceRefresh && supabase) {
+    await supabase
+      .from("anime_episodes")
+      .delete()
+      .eq("cache_key", `anime-episodes-${id}`);
+
+    console.log("🗑️ Deleted old episode cache:", id);
+  }
+
   const episodes = await getAnimeEpisodes(id, forceRefresh);
 
   res.json({
     status: "ok",
+    forceRefresh,
     total: episodes.length,
     results: episodes,
   });
