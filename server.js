@@ -602,22 +602,58 @@ async function getAnimeEpisodes(anilistId, forceRefresh = false) {
   try {
     const cacheKey = `anime-episodes-${anilistId}`;
 
-    if (!forceRefresh) {
-      const cached = await getSupabaseCache("anime_episodes", cacheKey);
-
-      if (cached?.fresh) {
-        console.log("✅ EPISODES CACHE HIT");
-        return cached.data;
-      }
-    }
-
-    console.log("🔥 FETCHING ALL EPISODE PAGES:", anilistId);
+    console.log("📺 EPISODE REQUEST:", {
+      anilistId,
+      forceRefresh,
+    });
 
     const details = await getAnimeDetails(anilistId);
 
     if (!details?.malId) {
+      console.log("❌ No MAL ID found for:", anilistId);
       return [];
     }
+
+    if (!forceRefresh) {
+      const cached = await getSupabaseCache("anime_episodes", cacheKey);
+
+      const expectedEpisodes = Number(
+        details.totalEpisodes || details.episodes || 0
+      );
+
+      const cachedLength = Array.isArray(cached?.data)
+        ? cached.data.length
+        : 0;
+
+      if (
+        cached?.fresh &&
+        cachedLength > 0 &&
+        (expectedEpisodes <= 0 || cachedLength >= expectedEpisodes)
+      ) {
+        console.log("✅ EPISODES CACHE HIT:", {
+          cachedLength,
+          expectedEpisodes,
+        });
+
+        return cached.data;
+      }
+
+      if (
+        cached?.fresh &&
+        cachedLength > 0 &&
+        expectedEpisodes > cachedLength
+      ) {
+        console.log("⚠️ INCOMPLETE EPISODE CACHE DETECTED. REFRESHING:", {
+          cachedLength,
+          expectedEpisodes,
+        });
+      }
+    }
+
+    console.log("🔥 FETCHING ALL EPISODE PAGES:", {
+      anilistId,
+      malId: details.malId,
+    });
 
     const allEpisodes = [];
     let page = 1;
@@ -629,13 +665,12 @@ async function getAnimeEpisodes(anilistId, forceRefresh = false) {
       });
 
       const episodes = response?.data || [];
+
       allEpisodes.push(...episodes);
 
       hasNextPage = Boolean(response?.pagination?.has_next_page);
 
-      console.log(
-        `📺 Page ${page} fetched: ${episodes.length} episodes`
-      );
+      console.log(`📺 Page ${page} fetched: ${episodes.length} episodes`);
 
       page++;
 
@@ -643,7 +678,7 @@ async function getAnimeEpisodes(anilistId, forceRefresh = false) {
         await sleep(800);
       }
 
-      if (page > 30) {
+      if (page > 40) {
         console.log("⚠️ Stopped at page safety limit.");
         break;
       }
@@ -651,7 +686,11 @@ async function getAnimeEpisodes(anilistId, forceRefresh = false) {
 
     const finalEpisodes = allEpisodes
       .map((ep, index) => {
-        const epNumber = Number(ep.mal_id) || index + 1;
+        const epNumber =
+          Number(ep.mal_id) ||
+          Number(ep.episode) ||
+          Number(ep.number) ||
+          index + 1;
 
         return {
           id: epNumber,
@@ -659,7 +698,12 @@ async function getAnimeEpisodes(anilistId, forceRefresh = false) {
           episodeId: epNumber,
           episodeNumber: epNumber,
 
-          title: ep.title || `Episode ${epNumber}`,
+          title:
+            ep.title ||
+            ep.title_japanese ||
+            ep.title_romanji ||
+            `Episode ${epNumber}`,
+
           description: ep.synopsis || "",
 
           image:
@@ -667,7 +711,7 @@ async function getAnimeEpisodes(anilistId, forceRefresh = false) {
             ep.images?.webp?.image_url ||
             null,
 
-          aired: ep.aired,
+          aired: ep.aired || null,
           filler: Boolean(ep.filler),
           recap: Boolean(ep.recap),
           score: ep.score || null,
@@ -683,9 +727,26 @@ async function getAnimeEpisodes(anilistId, forceRefresh = false) {
       TTL.EPISODES
     );
 
+    console.log("✅ EPISODES SAVED:", {
+      anilistId,
+      malId: details.malId,
+      total: finalEpisodes.length,
+    });
+
     return finalEpisodes;
   } catch (error) {
     console.log("Episode error:", error?.response?.status || error.message);
+
+    const fallback = await getSupabaseCache(
+      "anime_episodes",
+      `anime-episodes-${anilistId}`
+    );
+
+    if (fallback?.data) {
+      console.log("⚠️ Returning stale episode cache as fallback");
+      return fallback.data;
+    }
+
     return [];
   }
 }
