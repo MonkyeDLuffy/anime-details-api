@@ -39,7 +39,7 @@ const TTL = {
   STREAM: 1000 * 60 * 60 * 24 * 7,
   ANIKOTO_MAP: 1000 * 60 * 60 * 24 * 30,
   SCHEDULE: 1000 * 60 * 60 * 6,
-  TMDB_TTL: 1000 * 60 * 60 * 24 * 7;
+  TMDB_TTL: 1000 * 60 * 60 * 24 * 7,
 };
 
 const MEDIA_FIELDS = `
@@ -406,10 +406,6 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
         episodes: [],
       };
 
-      await setSupabaseCache("search_cache", cacheKey, emptyData, TMDB_TTL);
-      return emptyData;
-    }
-
     const tv = await axios.get(`${TMDB}/tv/${show.id}`, {
       params: {
         api_key: process.env.TMDB_API_KEY,
@@ -498,24 +494,6 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
     return null;
   }
 }
-
-app.get("/api/tmdb/:id", async (req, res) => {
-  const id = Number(req.params.id);
-
-  if (!id) {
-    return res.status(400).json({
-      status: "error",
-      data: null,
-    });
-  }
-
-  const data = await getTmdbAnimeData(id);
-
-  res.json({
-    status: "ok",
-    data,
-  });
-});
 
 async function anilist(query, variables = {}) {
   return new Promise((resolve, reject) => {
