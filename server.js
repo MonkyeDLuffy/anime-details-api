@@ -598,68 +598,83 @@ async function getAnimeDetails(anilistId) {
   }
 }
 
-async function getAnimeEpisodes(anilistId) {
+async function getAnimeEpisodes(anilistId, forceRefresh = false) {
   try {
     const cacheKey = `anime-episodes-${anilistId}`;
 
-    const cached = await getSupabaseCache(
-      "anime_episodes",
-      cacheKey
-    );
+    if (!forceRefresh) {
+      const cached = await getSupabaseCache("anime_episodes", cacheKey);
 
-    if (cached?.fresh) {
-      console.log(
-        "✅ EPISODES CACHE HIT"
-      );
-
-      return cached.data;
+      if (cached?.fresh) {
+        console.log("✅ EPISODES CACHE HIT");
+        return cached.data;
+      }
     }
 
-    const details =
-      await getAnimeDetails(anilistId);
+    console.log("🔥 FETCHING ALL EPISODE PAGES:", anilistId);
+
+    const details = await getAnimeDetails(anilistId);
 
     if (!details?.malId) {
       return [];
     }
 
-    const response = await jikanGet(
-      `/anime/${details.malId}/episodes`
-    );
+    const allEpisodes = [];
+    let page = 1;
+    let hasNextPage = true;
 
-    const episodes =
-      response?.data || [];
+    while (hasNextPage) {
+      const response = await jikanGet(`/anime/${details.malId}/episodes`, {
+        page,
+      });
 
-    const finalEpisodes =
-      episodes.map((ep) => ({
-        id: ep.mal_id || ep.mal_id,
-        number: ep.mal_id
-          ? ep.mal_id
-          : ep.mal_id,
+      const episodes = response?.data || [];
+      allEpisodes.push(...episodes);
 
-        episodeId:
-          ep.mal_id ||
-          ep.mal_id,
+      hasNextPage = Boolean(response?.pagination?.has_next_page);
 
-        title:
-          ep.title ||
-          `Episode ${ep.mal_id}`,
+      console.log(
+        `📺 Page ${page} fetched: ${episodes.length} episodes`
+      );
 
-        description:
-          ep.synopsis || "",
+      page++;
 
-        image:
-          ep.images?.jpg
-            ?.image_url || null,
+      if (hasNextPage) {
+        await sleep(800);
+      }
 
-        aired: ep.aired,
-        filler: ep.filler,
-        recap: ep.recap,
+      if (page > 30) {
+        console.log("⚠️ Stopped at page safety limit.");
+        break;
+      }
+    }
 
-        score: ep.score,
+    const finalEpisodes = allEpisodes
+      .map((ep, index) => {
+        const epNumber = Number(ep.mal_id) || index + 1;
 
-        episodeNumber:
-          ep.mal_id || 0,
-      }));
+        return {
+          id: epNumber,
+          number: epNumber,
+          episodeId: epNumber,
+          episodeNumber: epNumber,
+
+          title: ep.title || `Episode ${epNumber}`,
+          description: ep.synopsis || "",
+
+          image:
+            ep.images?.jpg?.image_url ||
+            ep.images?.webp?.image_url ||
+            null,
+
+          aired: ep.aired,
+          filler: Boolean(ep.filler),
+          recap: Boolean(ep.recap),
+          score: ep.score || null,
+        };
+      })
+      .filter((ep) => ep.number)
+      .sort((a, b) => Number(a.number) - Number(b.number));
 
     await setSupabaseCache(
       "anime_episodes",
@@ -670,11 +685,7 @@ async function getAnimeEpisodes(anilistId) {
 
     return finalEpisodes;
   } catch (error) {
-    console.log(
-      "Episode error:",
-      error?.response?.status || error.message
-    );
-
+    console.log("Episode error:", error?.response?.status || error.message);
     return [];
   }
 }
@@ -1105,8 +1116,6 @@ app.get("/api/episodes/:id", async (req, res) => {
       .from("anime_episodes")
       .delete()
       .eq("cache_key", `anime-episodes-${id}`);
-
-    console.log("🗑️ Deleted old episode cache:", id);
   }
 
   const episodes = await getAnimeEpisodes(id, forceRefresh);
