@@ -13,6 +13,9 @@ const ANILIST = "https://graphql.anilist.co";
 const JIKAN = "https://api.jikan.moe/v4";
 const MEGAPLAY = "https://megaplay.buzz";
 const ANIKOTO = "https://anikotoapi.site";
+const TMDB = "https://api.themoviedb.org/3";
+const TMDB_IMAGE = "https://image.tmdb.org/t/p/original";
+const TMDB_TTL = 1000 * 60 * 60 * 24 * 7;
 
 
 app.use(cors());
@@ -304,48 +307,123 @@ async function processQueue() {
   processingQueue = false;
 }
 
-const TMDB = "https://api.themoviedb.org/3";
-const TMDB_IMAGE = "https://image.tmdb.org/t/p/original";
-const TMDB_TTL = 1000 * 60 * 60 * 24 * 7;
-
-async function getTmdbAnimeData(anilistId) {
+async function getTmdbAnimeData(anilistId, forceRefresh = false) {
   try {
     const cacheKey = `tmdb-anime-${anilistId}`;
 
-    const cached = await getSupabaseCache("search_cache", cacheKey);
-    if (cached?.fresh) {
-      console.log("✅ TMDB CACHE HIT");
-      return cached.data;
+    if (!forceRefresh) {
+      const cached = await getSupabaseCache("search_cache", cacheKey);
+
+      if (cached?.fresh) {
+        console.log("✅ TMDB CACHE HIT:", anilistId);
+        return cached.data;
+      }
     }
 
     const details = await getAnimeDetails(anilistId);
 
-    if (!details?.title || !process.env.TMDB_API_KEY) {
+    if (!details || !process.env.TMDB_API_KEY) {
       return null;
     }
 
-    const search = await axios.get(`${TMDB}/search/tv`, {
-      params: {
-        api_key: process.env.TMDB_API_KEY,
-        query: details.title,
-        first_air_date_year: details.year || "",
-      },
-    });
+    const rawTitles = [
+      details.title,
+      details.name,
+      details.titleEnglish,
+      details.englishTitle,
+      details.romajiTitle,
+      details.titleRomaji,
+      details.nativeTitle,
+      details.titleNative,
+    ];
 
-    const show = search.data?.results?.[0];
-    if (!show?.id) return null;
+    const possibleTitles = [
+      ...new Set(
+        rawTitles
+          .filter(Boolean)
+          .flatMap((title) => {
+            const original = String(title).trim();
+
+            const clean = original
+              .replace(/\([^)]*\)/g, "")
+              .replace(/season\s*\d+/gi, "")
+              .replace(/\d+(st|nd|rd|th)?\s*season/gi, "")
+              .replace(/part\s*\d+/gi, "")
+              .replace(/cour\s*\d+/gi, "")
+              .replace(/:\s*.*/g, "")
+              .replace(/-.*$/g, "")
+              .trim();
+
+            return [original, clean];
+          })
+          .filter(Boolean)
+      ),
+    ];
+
+    console.log("🔍 TMDB search titles:", possibleTitles);
+
+    let show = null;
+
+    for (const searchTitle of possibleTitles) {
+      try {
+        const search = await axios.get(`${TMDB}/search/tv`, {
+          params: {
+            api_key: process.env.TMDB_API_KEY,
+            query: searchTitle,
+          },
+          timeout: 20000,
+        });
+
+        const results = search.data?.results || [];
+
+        show =
+          results.find((item) =>
+            String(item.name || "")
+              .toLowerCase()
+              .includes(searchTitle.toLowerCase().slice(0, 10))
+          ) ||
+          results.find((item) =>
+            String(item.original_name || "")
+              .toLowerCase()
+              .includes(searchTitle.toLowerCase().slice(0, 10))
+          ) ||
+          results[0];
+
+        if (show?.id) {
+          console.log("✅ TMDB MATCH:", searchTitle, show.name);
+          break;
+        }
+      } catch (err) {
+        console.log("TMDB search failed:", searchTitle, err.message);
+      }
+    }
+
+    if (!show?.id) {
+      const emptyData = {
+        tmdbId: null,
+        title: details.title || details.name || "Anime",
+        logo: null,
+        episodes: [],
+      };
+
+      await setSupabaseCache("search_cache", cacheKey, emptyData, TMDB_TTL);
+      return emptyData;
+    }
 
     const tv = await axios.get(`${TMDB}/tv/${show.id}`, {
       params: {
         api_key: process.env.TMDB_API_KEY,
         append_to_response: "images",
+        include_image_language: "en,null,ja",
       },
+      timeout: 25000,
     });
 
     const tvData = tv.data;
 
     const logo =
       tvData?.images?.logos?.find((x) => x.iso_639_1 === "en") ||
+      tvData?.images?.logos?.find((x) => x.iso_639_1 === "ja") ||
       tvData?.images?.logos?.find((x) => !x.iso_639_1) ||
       tvData?.images?.logos?.[0];
 
@@ -364,6 +442,7 @@ async function getTmdbAnimeData(anilistId) {
             params: {
               api_key: process.env.TMDB_API_KEY,
             },
+            timeout: 20000,
           }
         );
 
@@ -390,10 +469,26 @@ async function getTmdbAnimeData(anilistId) {
 
     const finalData = {
       tmdbId: show.id,
-      title: tvData?.name || show.name || details.title,
+      title: tvData?.name || show.name || details.title || "Anime",
       logo: logo?.file_path ? `${TMDB_IMAGE}${logo.file_path}` : null,
       episodes: allEpisodes,
     };
+
+    await setSupabaseCache("search_cache", cacheKey, finalData, TMDB_TTL);
+
+    console.log("✅ TMDB SAVED:", {
+      anilistId,
+      tmdbId: show.id,
+      logo: Boolean(finalData.logo),
+      episodes: allEpisodes.length,
+    });
+
+    return finalData;
+  } catch (error) {
+    console.log("TMDB error:", error.message);
+    return null;
+  }
+}
 
     await setSupabaseCache("search_cache", cacheKey, finalData, TMDB_TTL);
 
@@ -1782,6 +1877,36 @@ app.get("/api/schedule", async (req, res) => {
       results: [],
     });
   }
+});
+
+app.get("/api/tmdb/:id", async (req, res) => {
+  const id = Number(req.params.id);
+
+  if (!id) {
+    return res.status(400).json({
+      status: "error",
+      data: null,
+    });
+  }
+
+  const forceRefresh =
+    String(req.query.refresh || "").toLowerCase() === "true" ||
+    String(req.query.force || "").toLowerCase() === "true";
+
+  if (forceRefresh && supabase) {
+    await supabase
+      .from("search_cache")
+      .delete()
+      .eq("cache_key", `tmdb-anime-${id}`);
+  }
+
+  const data = await getTmdbAnimeData(id, forceRefresh);
+
+  res.json({
+    status: "ok",
+    forceRefresh,
+    data,
+  });
 });
 
 app.listen(PORT, () => {
