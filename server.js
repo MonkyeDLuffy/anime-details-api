@@ -39,7 +39,7 @@ const TTL = {
   STREAM: 1000 * 60 * 60 * 24 * 7,
   ANIKOTO_MAP: 1000 * 60 * 60 * 24 * 30,
   SCHEDULE: 1000 * 60 * 60 * 6,
-  TMDB_TTL: 1000 * 60 * 60 * 24 * 7,
+  TMDB: 1000 * 60 * 60 * 24 * 7,
 };
 
 const MEDIA_FIELDS = `
@@ -406,6 +406,16 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
         episodes: [],
       };
 
+      await setSupabaseCache(
+        "search_cache",
+        cacheKey,
+        emptyData,
+        TTL.TMDB_TTL
+      );
+
+      return emptyData;
+    }
+
     const tv = await axios.get(`${TMDB}/tv/${show.id}`, {
       params: {
         api_key: process.env.TMDB_API_KEY,
@@ -450,7 +460,9 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
             seasonNumber: season.season_number,
             tmdbEpisodeNumber: ep.episode_number,
             title: ep.name,
-            image: ep.still_path ? `${TMDB_IMAGE}${ep.still_path}` : null,
+            image: ep.still_path
+              ? `${TMDB_IMAGE}${ep.still_path}`
+              : null,
             overview: ep.overview || "",
           });
 
@@ -459,18 +471,29 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
 
         await sleep(250);
       } catch (err) {
-        console.log("TMDB season failed:", season.season_number, err.message);
+        console.log(
+          "TMDB season failed:",
+          season.season_number,
+          err.message
+        );
       }
     }
 
     const finalData = {
       tmdbId: show.id,
       title: tvData?.name || show.name || details.title || "Anime",
-      logo: logo?.file_path ? `${TMDB_IMAGE}${logo.file_path}` : null,
+      logo: logo?.file_path
+        ? `${TMDB_IMAGE}${logo.file_path}`
+        : null,
       episodes: allEpisodes,
     };
 
-    await setSupabaseCache("search_cache", cacheKey, finalData, TMDB_TTL);
+    await setSupabaseCache(
+      "search_cache",
+      cacheKey,
+      finalData,
+      TTL.TMDB_TTL
+    );
 
     console.log("✅ TMDB SAVED:", {
       anilistId,
