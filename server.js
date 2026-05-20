@@ -509,15 +509,6 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
   }
 }
 
-    await setSupabaseCache("search_cache", cacheKey, finalData, TMDB_TTL);
-
-    return finalData;
-  } catch (error) {
-    console.log("TMDB error:", error.message);
-    return null;
-  }
-}
-
 async function anilist(query, variables = {}) {
   return new Promise((resolve, reject) => {
     anilistQueue.push({
