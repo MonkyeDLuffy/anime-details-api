@@ -387,7 +387,7 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
               .toLowerCase()
               .includes(searchTitle.toLowerCase().slice(0, 10))
           ) ||
-          results[0];
+          null;
 
         if (show?.id) {
           console.log("✅ TMDB MATCH:", searchTitle, show.name);
