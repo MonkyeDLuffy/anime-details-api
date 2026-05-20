@@ -13,6 +13,8 @@ const ANILIST = "https://graphql.anilist.co";
 const JIKAN = "https://api.jikan.moe/v4";
 const MEGAPLAY = "https://megaplay.buzz";
 const ANIKOTO = "https://anikotoapi.site";
+const TMDB = "https://api.themoviedb.org/3";
+const TMDB_IMAGE = "https://image.tmdb.org/t/p/original";
 
 app.use(cors());
 app.use(express.json());
@@ -301,6 +303,65 @@ async function processQueue() {
   }
 
   processingQueue = false;
+}
+
+async function getTmdbAnimeData(anilistId) {
+  try {
+    const details = await getAnimeDetails(anilistId);
+
+    if (!details?.title || !process.env.TMDB_API_KEY) {
+      return null;
+    }
+
+    const search = await axios.get(`${TMDB}/search/tv`, {
+      params: {
+        api_key: process.env.TMDB_API_KEY,
+        query: details.title,
+        first_air_date_year: details.year || "",
+      },
+    });
+
+    const show = search.data?.results?.[0];
+
+    if (!show?.id) {
+      return null;
+    }
+
+    const [imagesRes, seasonRes] = await Promise.all([
+      axios.get(`${TMDB}/tv/${show.id}/images`, {
+        params: {
+          api_key: process.env.TMDB_API_KEY,
+        },
+      }),
+      axios.get(`${TMDB}/tv/${show.id}/season/1`, {
+        params: {
+          api_key: process.env.TMDB_API_KEY,
+        },
+      }),
+    ]);
+
+    const logo =
+      imagesRes.data?.logos?.find((x) => x.iso_639_1 === "en") ||
+      imagesRes.data?.logos?.[0];
+
+    return {
+      tmdbId: show.id,
+      title: show.name,
+      logo: logo?.file_path ? `${TMDB_IMAGE}${logo.file_path}` : null,
+      backdrop: show.backdrop_path ? `${TMDB_IMAGE}${show.backdrop_path}` : null,
+      poster: show.poster_path ? `${TMDB_IMAGE}${show.poster_path}` : null,
+      episodes:
+        seasonRes.data?.episodes?.map((ep) => ({
+          episodeNumber: ep.episode_number,
+          title: ep.name,
+          image: ep.still_path ? `${TMDB_IMAGE}${ep.still_path}` : null,
+          overview: ep.overview,
+        })) || [],
+    };
+  } catch (error) {
+    console.log("TMDB error:", error.message);
+    return null;
+  }
 }
 
 async function anilist(query, variables = {}) {
@@ -1663,6 +1724,24 @@ app.get("/api/schedule", async (req, res) => {
       results: [],
     });
   }
+});
+
+app.get("/api/tmdb/:id", async (req, res) => {
+  const id = Number(req.params.id);
+
+  if (!id) {
+    return res.status(400).json({
+      status: "error",
+      data: null,
+    });
+  }
+
+  const data = await getTmdbAnimeData(id);
+
+  res.json({
+    status: "ok",
+    data,
+  });
 });
 
 app.listen(PORT, () => {
