@@ -350,7 +350,7 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
               .replace(/\d+(st|nd|rd|th)?\s*season/gi, "")
               .replace(/part\s*\d+/gi, "")
               .replace(/cour\s*\d+/gi, "")
-              .replace(/:\s*.*/g, "")
+              .replace(/\s+part\s+\d+/gi, "")
               .replace(/-.*$/g, "")
               .trim();
 
@@ -376,18 +376,25 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
 
         const results = search.data?.results || [];
 
-        show =
-          results.find((item) =>
-            String(item.name || "")
-              .toLowerCase()
-              .includes(searchTitle.toLowerCase().slice(0, 10))
-          ) ||
-          results.find((item) =>
-            String(item.original_name || "")
-              .toLowerCase()
-              .includes(searchTitle.toLowerCase().slice(0, 10))
-          ) ||
-          null;
+       const normalizeTitle = (value = "") =>
+  String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+const target = normalizeTitle(searchTitle);
+
+show =
+  results.find((item) => {
+    const name = normalizeTitle(item.name);
+    const originalName = normalizeTitle(item.original_name);
+
+    return (
+      name === target ||
+      originalName === target ||
+      name.startsWith(target) ||
+      originalName.startsWith(target)
+    );
+  }) || null;
 
         if (show?.id) {
           console.log("✅ TMDB MATCH:", searchTitle, show.name);
