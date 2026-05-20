@@ -15,7 +15,6 @@ const MEGAPLAY = "https://megaplay.buzz";
 const ANIKOTO = "https://anikotoapi.site";
 const TMDB = "https://api.themoviedb.org/3";
 const TMDB_IMAGE = "https://image.tmdb.org/t/p/original";
-const TMDB_TTL = 1000 * 60 * 60 * 24 * 7;
 
 
 app.use(cors());
@@ -40,6 +39,7 @@ const TTL = {
   STREAM: 1000 * 60 * 60 * 24 * 7,
   ANIKOTO_MAP: 1000 * 60 * 60 * 24 * 30,
   SCHEDULE: 1000 * 60 * 60 * 6,
+  TMDB_TTL: 1000 * 60 * 60 * 24 * 7;
 };
 
 const MEDIA_FIELDS = `
