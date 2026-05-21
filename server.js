@@ -801,6 +801,44 @@ async function getAnimeDetails(anilistId) {
   }
 }
 
+async function getAniListAiredEpisodeCount(anilistId) {
+  try {
+    const query = `
+      query ($id: Int) {
+        Media(id: $id, type: ANIME) {
+          episodes
+          status
+          nextAiringEpisode {
+            episode
+          }
+        }
+      }
+    `;
+
+    const res = await axios.post(
+      "https://graphql.anilist.co",
+      {
+        query,
+        variables: { id: Number(anilistId) },
+      },
+      { timeout: 15000 }
+    );
+
+    const media = res.data?.data?.Media;
+
+    if (!media) return 0;
+
+    if (media.nextAiringEpisode?.episode) {
+      return Math.max(0, Number(media.nextAiringEpisode.episode) - 1);
+    }
+
+    return Number(media.episodes || 0);
+  } catch (err) {
+    console.log("AniList aired count error:", err.message);
+    return 0;
+  }
+}
+
 async function getAnimeEpisodes(anilistId, forceRefresh = false) {
   try {
     const cacheKey = `anime-episodes-${anilistId}`;
@@ -851,29 +889,49 @@ async function getAnimeEpisodes(anilistId, forceRefresh = false) {
       if (page > 40) break;
     }
 
-    const finalEpisodes = allEpisodes
-      .map((ep, index) => {
-        const epNumber = Number(ep.mal_id) || index + 1;
+   let finalEpisodes = allEpisodes
+  .map((ep, index) => {
+    const epNumber = Number(ep.mal_id) || index + 1;
 
-        return {
-          id: epNumber,
-          number: epNumber,
-          episodeId: epNumber,
-          episodeNumber: epNumber,
-          title: ep.title || `Episode ${epNumber}`,
-          description: ep.synopsis || "",
-          image:
-            ep.images?.jpg?.image_url ||
-            ep.images?.webp?.image_url ||
-            null,
-          aired: ep.aired,
-          filler: Boolean(ep.filler),
-          recap: Boolean(ep.recap),
-          score: ep.score || null,
-        };
-      })
-      .filter((ep) => ep.number)
-      .sort((a, b) => Number(a.number) - Number(b.number));
+    return {
+      id: epNumber,
+      number: epNumber,
+      episodeId: epNumber,
+      episodeNumber: epNumber,
+      title: ep.title || `Episode ${epNumber}`,
+      description: ep.synopsis || "",
+      image:
+        ep.images?.jpg?.image_url ||
+        ep.images?.webp?.image_url ||
+        null,
+      aired: ep.aired,
+      filler: Boolean(ep.filler),
+      recap: Boolean(ep.recap),
+      score: ep.score || null,
+    };
+  })
+  .filter((ep) => ep.number)
+  .sort((a, b) => Number(a.number) - Number(b.number));
+
+const aniListAiredCount = await getAniListAiredEpisodeCount(anilistId);
+
+if (aniListAiredCount > finalEpisodes.length) {
+  for (let ep = finalEpisodes.length + 1; ep <= aniListAiredCount; ep++) {
+    finalEpisodes.push({
+      id: ep,
+      number: ep,
+      episodeId: ep,
+      episodeNumber: ep,
+      title: `Episode ${ep}`,
+      description: "",
+      image: null,
+      aired: null,
+      filler: false,
+      recap: false,
+      score: null,
+    });
+  }
+}
 
     await setSupabaseCache(
       "anime_episodes",
