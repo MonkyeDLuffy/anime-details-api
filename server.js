@@ -819,44 +819,6 @@ async function getAniListAiredEpisodeCount(anilistId) {
       "https://graphql.anilist.co",
       {
         query,
-        variables: { id: Number(anilistId) },
-      },
-      { timeout: 15000 }
-    );
-
-    const media = res.data?.data?.Media;
-
-    if (!media) return 0;
-
-    if (media.nextAiringEpisode?.episode) {
-      return Math.max(0, Number(media.nextAiringEpisode.episode) - 1);
-    }
-
-    return Number(media.episodes || 0);
-  } catch (err) {
-    console.log("AniList aired count error:", err.message);
-    return 0;
-  }
-}
-
-async function getAniListAiredEpisodeCount(anilistId) {
-  try {
-    const query = `
-      query ($id: Int) {
-        Media(id: $id, type: ANIME) {
-          episodes
-          status
-          nextAiringEpisode {
-            episode
-          }
-        }
-      }
-    `;
-
-    const res = await axios.post(
-      "https://graphql.anilist.co",
-      {
-        query,
         variables: {
           id: Number(anilistId),
         },
