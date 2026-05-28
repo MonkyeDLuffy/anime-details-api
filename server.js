@@ -1765,54 +1765,33 @@ app.get("/api/category/:type", async (req, res) => {
   const page = Number(req.query.page || 1);
 
   try {
-    const configMap = {
-      "recently-added": {
-        sort: ["START_DATE_DESC"],
-      },
-      "top-airing": {
-        status: "RELEASING",
-        sort: ["TRENDING_DESC", "POPULARITY_DESC"],
-      },
-      "top-upcoming": {
-        status: "NOT_YET_RELEASED",
-        sort: ["POPULARITY_DESC"],
-      },
-      "most-popular": {
-        sort: ["POPULARITY_DESC"],
-      },
-      movies: {
-        format: "MOVIE",
-        sort: ["POPULARITY_DESC"],
-      },
-      "tv-series": {
-        format: "TV",
-        sort: ["POPULARITY_DESC"],
-      },
-      ovas: {
-        format: "OVA",
-        sort: ["POPULARITY_DESC"],
-      },
-      onas: {
-        format: "ONA",
-        sort: ["POPULARITY_DESC"],
-      },
-      specials: {
-        format: "SPECIAL",
-        sort: ["POPULARITY_DESC"],
-      },
+    const sortMap = {
+      "recently-added": "START_DATE_DESC",
+      "top-upcoming": "POPULARITY_DESC",
+      "most-popular": "POPULARITY_DESC",
+      "top-airing": "POPULARITY_DESC",
+      movies: "POPULARITY_DESC",
+      "tv-series": "POPULARITY_DESC",
+      ovas: "POPULARITY_DESC",
+      onas: "POPULARITY_DESC",
+      specials: "POPULARITY_DESC",
     };
 
-    const config = configMap[type] || {
-      sort: ["POPULARITY_DESC"],
+    const formatMap = {
+      movies: "MOVIE",
+      "tv-series": "TV",
+      ovas: "OVA",
+      onas: "ONA",
+      specials: "SPECIAL",
+    };
+
+    const statusMap = {
+      "top-airing": "RELEASING",
+      "top-upcoming": "NOT_YET_RELEASED",
     };
 
     const query = `
-      query (
-        $page: Int,
-        $sort: [MediaSort],
-        $format: MediaFormat,
-        $status: MediaStatus
-      ) {
+      query ($page: Int, $sort: [MediaSort], $format: MediaFormat, $status: MediaStatus) {
         Page(page: $page, perPage: 24) {
           pageInfo {
             total
@@ -1835,35 +1814,39 @@ app.get("/api/category/:type", async (req, res) => {
 
     let data = await anilist(query, {
       page,
-      sort: config.sort,
-      format: config.format || null,
-      status: config.status || null,
+      sort: sortMap[type] || "POPULARITY_DESC",
+      format: formatMap[type] || null,
+      status: statusMap[type] || null,
     });
 
-    let media = data?.Page?.media || [];
+    let results = safeAnimeList(data?.Page?.media || []);
 
-    // fallback for top-airing if AniList gives empty
-    if (type === "top-airing" && media.length === 0) {
-      data = await anilist(query, {
-        page,
-        sort: ["POPULARITY_DESC"],
-        format: null,
-        status: "RELEASING",
-      });
+    // emergency fallback: if top-airing empty, use home top_airing
+    if (type === "top-airing" && results.length === 0) {
+      const homeQuery = `
+        query {
+          Page(page: 1, perPage: 24) {
+            media(type: ANIME, sort: POPULARITY_DESC, status: RELEASING, isAdult: false) {
+              ${MEDIA_FIELDS}
+            }
+          }
+        }
+      `;
 
-      media = data?.Page?.media || [];
+      const homeData = await anilist(homeQuery, {});
+      results = safeAnimeList(homeData?.Page?.media || []);
     }
 
     res.json({
       status: "ok",
       category: type,
       page,
-      results: safeAnimeList(media),
+      results,
       paginationInfo: data?.Page?.pageInfo || {
-        total: 0,
+        total: results.length,
         currentPage: page,
-        lastPage: 1,
-        hasNextPage: false,
+        lastPage: page,
+        hasNextPage: results.length >= 24,
       },
     });
   } catch (error) {
