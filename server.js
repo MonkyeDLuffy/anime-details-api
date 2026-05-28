@@ -1756,162 +1756,159 @@ app.get("/api/seasons/:id", async (req, res) => {
   }
 });
 
-/* ===============================
-   CATEGORY
-================================ */
+import { useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import getCategoryInfo from "@/src/utils/getCategoryInfo.utils";
+import { createAnimeSlug } from "@/src/utils/slug.utils";
 
-app.get("/api/category/:type", async (req, res) => {
-  const type = req.params.type;
-  const page = Number(req.query.page || 1);
+export default function Category({ path, label }) {
+  const [anime, setAnime] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [pagination, setPagination] = useState(null);
 
-  try {
-    const sortMap = {
-      "recently-added": "START_DATE_DESC",
-      "top-upcoming": "POPULARITY_DESC",
-      "most-popular": "POPULARITY_DESC",
-      movies: "POPULARITY_DESC",
-      "tv-series": "POPULARITY_DESC",
-      ovas: "POPULARITY_DESC",
-      onas: "POPULARITY_DESC",
-      specials: "POPULARITY_DESC",
-    };
+  const [searchParams, setSearchParams] = useSearchParams();
 
-    const formatMap = {
-      movies: "MOVIE",
-      "tv-series": "TV",
-      ovas: "OVA",
-      onas: "ONA",
-      specials: "SPECIAL",
-    };
+  const page = Number(searchParams.get("page") || 1);
 
-    let query = "";
-    let variables = {};
+  const title = label || path?.split("-").join(" ");
 
-    /* ===============================
-       TOP AIRING SPECIAL QUERY
-    ============================== */
+  useEffect(() => {
+    async function loadCategory() {
+      setLoading(true);
 
-    if (type === "top-airing") {
-      query = `
-        query ($page: Int) {
-          Page(page: $page, perPage: 24) {
-            pageInfo {
-              total
-              currentPage
-              lastPage
-              hasNextPage
-            }
+      const data = await getCategoryInfo(path, page);
 
-            media(
-              type: ANIME
-              status: RELEASING
-              sort: POPULARITY_DESC
-              isAdult: false
-            ) {
-              ${MEDIA_FIELDS}
-            }
-          }
-        }
-      `;
+      const results =
+        data?.results ||
+        data?.data ||
+        data?.animes ||
+        [];
 
-      variables = {
-        page,
-      };
+      setAnime(Array.isArray(results) ? results : []);
+
+      setPagination(data?.paginationInfo || null);
+
+      setLoading(false);
+
+      window.scrollTo({
+        top: 0,
+        behavior: "smooth",
+      });
     }
 
-    /* ===============================
-       TOP UPCOMING
-    ============================== */
+    loadCategory();
+  }, [path, page]);
 
-    else if (type === "top-upcoming") {
-      query = `
-        query ($page: Int) {
-          Page(page: $page, perPage: 24) {
-            pageInfo {
-              total
-              currentPage
-              lastPage
-              hasNextPage
-            }
+  return (
+    <div className="min-h-screen bg-[#080808] text-white px-6 pt-28 pb-20">
+      <div className="max-w-[1500px] mx-auto">
 
-            media(
-              type: ANIME
-              status: NOT_YET_RELEASED
-              sort: POPULARITY_DESC
-              isAdult: false
-            ) {
-              ${MEDIA_FIELDS}
-            }
-          }
-        }
-      `;
+        <h1 className="text-3xl font-bold capitalize mb-8">
+          {title}
+        </h1>
 
-      variables = {
-        page,
-      };
-    }
+        {loading && (
+          <p className="text-gray-400">
+            Loading...
+          </p>
+        )}
 
-    /* ===============================
-       NORMAL CATEGORY
-    ============================== */
+        {!loading && anime.length === 0 && (
+          <p className="text-gray-400">
+            No results found for: {title}
+          </p>
+        )}
 
-    else {
-      query = `
-        query ($page: Int, $sort: [MediaSort], $format: MediaFormat) {
-          Page(page: $page, perPage: 24) {
-            pageInfo {
-              total
-              currentPage
-              lastPage
-              hasNextPage
-            }
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-6 gap-5">
+          {anime.map((item, index) => {
+            const id = item.id || item.anilistId;
 
-            media(
-              type: ANIME
-              sort: $sort
-              format: $format
-              isAdult: false
-            ) {
-              ${MEDIA_FIELDS}
-            }
-          }
-        }
-      `;
+            const animeTitle =
+              item.title ||
+              item.name ||
+              item.animeTitle ||
+              "Unknown";
 
-      variables = {
-        page,
-        sort: sortMap[type] || "POPULARITY_DESC",
-        format: formatMap[type] || null,
-      };
-    }
+            const poster =
+              item.poster ||
+              item.image ||
+              item.cover ||
+              item.coverImage ||
+              "";
 
-    const data = await anilist(query, variables);
+            return (
+              <Link
+                key={`${id}-${index}`}
+                to={`/${createAnimeSlug(animeTitle, id)}`}
+                className="group"
+              >
+                <div className="relative overflow-hidden rounded-xl bg-white/5 border border-white/10">
 
-    const results = safeAnimeList(data?.Page?.media || []);
+                  <img
+                    src={poster}
+                    alt={animeTitle}
+                    className="w-full h-[280px] object-cover group-hover:scale-105 transition duration-300"
+                  />
 
-    res.json({
-      status: "ok",
-      category: type,
-      page,
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
 
-      results,
+                  <span className="absolute bottom-2 left-2 bg-black/70 text-xs px-2 py-1 rounded uppercase">
+                    {item.type || "TV"}
+                  </span>
+                </div>
 
-      paginationInfo: data?.Page?.pageInfo || {
-        total: results.length,
-        currentPage: page,
-        lastPage: page,
-        hasNextPage: results.length >= 24,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: "error",
-      error: "Category failed",
-      debug: error.message,
-      results: [],
-    });
-  }
-});
+                <h3 className="mt-3 font-semibold line-clamp-1">
+                  {animeTitle}
+                </h3>
+
+                <p className="text-xs text-gray-400 mt-1">
+                  {item.year || "Unknown"} • {item.episodes || "?"} EPS
+                </p>
+              </Link>
+            );
+          })}
+        </div>
+
+        {/* PAGINATION */}
+
+        {pagination && (
+          <div className="flex items-center justify-center gap-4 mt-14">
+
+            <button
+              disabled={page <= 1}
+              onClick={() =>
+                setSearchParams({
+                  page: page - 1,
+                })
+              }
+              className="px-5 py-3 rounded-full border border-white/10 bg-white/5 disabled:opacity-40"
+            >
+              ← Prev
+            </button>
+
+            <div className="w-12 h-12 rounded-full bg-white text-black flex items-center justify-center font-bold">
+              {page}
+            </div>
+
+            <button
+              disabled={!pagination?.hasNextPage}
+              onClick={() =>
+                setSearchParams({
+                  page: page + 1,
+                })
+              }
+              className="px-5 py-3 rounded-full border border-white/10 bg-white/5 disabled:opacity-40"
+            >
+              Next →
+            </button>
+
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
 
 /* ===============================
    TOP SEARCH
