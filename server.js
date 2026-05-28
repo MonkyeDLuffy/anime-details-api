@@ -400,18 +400,6 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
 
     const title = details.title || details.name || "Anime";
 
-    const getSeasonNumber = (text = "") => {
-      const t = String(text).toLowerCase();
-
-      const a = t.match(/season\s*(\d+)/i);
-      if (a?.[1]) return Number(a[1]);
-
-      const b = t.match(/(\d+)(st|nd|rd|th)?\s*season/i);
-      if (b?.[1]) return Number(b[1]);
-
-      return 1;
-    };
-
     const cleanSearchTitle = (value = "") =>
       String(value)
         .replace(/season\s*\d+/gi, "")
@@ -419,11 +407,6 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
         .replace(/\s+part\s+\d+/gi, "")
         .replace(/\s+cour\s+\d+/gi, "")
         .trim();
-
-    const normalizeTitle = (value = "") =>
-      String(value).toLowerCase().replace(/[^a-z0-9]/g, "");
-
-    const targetSeason = getSeasonNumber(title);
 
     const rawTitles = [
       details.title,
@@ -457,20 +440,19 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       });
 
       const results = search.data?.results || [];
-      const target = normalizeTitle(cleanSearchTitle(searchTitle));
 
-     const filtered = results.filter((item) =>
-  isLikelyAnimeTmdbShow(item, details)
-);
+      const filtered = results.filter((item) =>
+        isLikelyAnimeTmdbShow(item, details)
+      );
 
-const scored = filtered
-  .map((item) => ({
-    item,
-    score: scoreTmdbCandidate(item, details, searchTitle),
-  }))
-  .sort((a, b) => b.score - a.score);
+      const scored = filtered
+        .map((item) => ({
+          item,
+          score: scoreTmdbCandidate(item, details, searchTitle),
+        }))
+        .sort((a, b) => b.score - a.score);
 
-show = scored[0]?.item || null;
+      show = scored[0]?.item || null;
 
       if (show?.id) break;
     }
@@ -480,7 +462,7 @@ show = scored[0]?.item || null;
         tmdbId: null,
         title,
         logo: null,
-        seasonNumber: targetSeason,
+        seasonNumber: 1,
         episodes: [],
       };
 
@@ -491,7 +473,7 @@ show = scored[0]?.item || null;
     const tv = await axios.get(`${TMDB}/tv/${show.id}`, {
       params: {
         api_key: process.env.TMDB_API_KEY,
-        append_to_response: "images,episode_groups",
+        append_to_response: "images",
         include_image_language: "en,null,ja",
       },
       timeout: 20000,
@@ -506,68 +488,51 @@ show = scored[0]?.item || null;
       tvData?.images?.logos?.[0];
 
     let episodes = [];
+    let absoluteEpisodeNumber = 1;
 
-    const seasonGroups =
-      tvData?.episode_groups?.results?.filter(
-        (g) => String(g.type) === "6" || g.type === 6
-      ) || [];
+    const seasons = (tvData?.seasons || [])
+      .filter((season) => Number(season.season_number) > 0)
+      .sort((a, b) => Number(a.season_number) - Number(b.season_number));
 
-    if (seasonGroups.length) {
-      const group = seasonGroups[0];
+    for (const season of seasons) {
+      try {
+        const seasonRes = await axios.get(
+          `${TMDB}/tv/${show.id}/season/${season.season_number}`,
+          {
+            params: {
+              api_key: process.env.TMDB_API_KEY,
+            },
+            timeout: 20000,
+          }
+        );
 
-      const groupRes = await axios.get(`${TMDB}/tv/episode_group/${group.id}`, {
-        params: {
-          api_key: process.env.TMDB_API_KEY,
-        },
-        timeout: 20000,
-      });
+        const seasonEpisodes = seasonRes.data?.episodes || [];
 
-      const groups = groupRes.data?.groups || [];
+        for (const ep of seasonEpisodes) {
+          episodes.push({
+            episodeNumber: absoluteEpisodeNumber,
+            seasonNumber: season.season_number,
+            tmdbEpisodeNumber: ep.episode_number,
+            title: ep.name || `Episode ${absoluteEpisodeNumber}`,
+            image: ep.still_path ? `${TMDB_IMAGE}${ep.still_path}` : null,
+            overview: ep.overview || "",
+          });
 
-      const selectedGroup =
-        groups.find((g) =>
-          String(g.name || "")
-            .toLowerCase()
-            .includes(`season ${targetSeason}`)
-        ) ||
-        groups[targetSeason] ||
-        groups[targetSeason - 1];
-
-      episodes =
-  selectedGroup?.episodes?.map((ep) => ({
-    episodeNumber: ep.order || ep.episode_number,
-    seasonNumber: targetSeason,
-    tmdbEpisodeNumber: ep.episode_number,
-          title: ep.name,
-          image: ep.still_path ? `${TMDB_IMAGE}${ep.still_path}` : null,
-          overview: ep.overview || "",
-        })) || [];
-    }
-
-    if (!episodes.length) {
-      const seasonRes = await axios.get(`${TMDB}/tv/${show.id}/season/${targetSeason}`, {
-        params: {
-          api_key: process.env.TMDB_API_KEY,
-        },
-        timeout: 20000,
-      });
-
-      episodes =
-        seasonRes.data?.episodes?.map((ep) => ({
-          episodeNumber: ep.episode_number,
-          seasonNumber: targetSeason,
-          tmdbEpisodeNumber: ep.episode_number,
-          title: ep.name,
-          image: ep.still_path ? `${TMDB_IMAGE}${ep.still_path}` : null,
-          overview: ep.overview || "",
-        })) || [];
+          absoluteEpisodeNumber += 1;
+        }
+      } catch (seasonError) {
+        console.log(
+          `TMDB season fetch failed: ${show.id} season ${season.season_number}`,
+          seasonError.message
+        );
+      }
     }
 
     const finalData = {
       tmdbId: show.id,
       title,
       logo: logo?.file_path ? `${TMDB_IMAGE}${logo.file_path}` : null,
-      seasonNumber: targetSeason,
+      seasonNumber: 1,
       episodes,
     };
 
