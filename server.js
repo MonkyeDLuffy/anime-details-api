@@ -1769,7 +1769,6 @@ app.get("/api/category/:type", async (req, res) => {
       "recently-added": "START_DATE_DESC",
       "top-upcoming": "POPULARITY_DESC",
       "most-popular": "POPULARITY_DESC",
-      "top-airing": "POPULARITY_DESC",
       movies: "POPULARITY_DESC",
       "tv-series": "POPULARITY_DESC",
       ovas: "POPULARITY_DESC",
@@ -1785,47 +1784,118 @@ app.get("/api/category/:type", async (req, res) => {
       specials: "SPECIAL",
     };
 
-    const statusMap = {
-      "top-airing": "RELEASING",
-      "top-upcoming": "NOT_YET_RELEASED",
-    };
+    let query = "";
+    let variables = {};
 
-    const query = `
-      query ($page: Int, $sort: [MediaSort], $format: MediaFormat, $status: MediaStatus) {
-        Page(page: $page, perPage: 24) {
-          pageInfo {
-            total
-            currentPage
-            lastPage
-            hasNextPage
-          }
-          media(
-            type: ANIME,
-            sort: $sort,
-            format: $format,
-            status: $status,
-            isAdult: false
-          ) {
-            ${MEDIA_FIELDS}
+    /* ===============================
+       TOP AIRING SPECIAL QUERY
+    ============================== */
+
+    if (type === "top-airing") {
+      query = `
+        query ($page: Int) {
+          Page(page: $page, perPage: 24) {
+            pageInfo {
+              total
+              currentPage
+              lastPage
+              hasNextPage
+            }
+
+            media(
+              type: ANIME
+              status: RELEASING
+              sort: POPULARITY_DESC
+              isAdult: false
+            ) {
+              ${MEDIA_FIELDS}
+            }
           }
         }
-      }
-    `;
+      `;
 
-    let data = await anilist(query, {
-      page,
-      sort: sortMap[type] || "POPULARITY_DESC",
-      format: formatMap[type] || null,
-      status: statusMap[type] || null,
-    });
+      variables = {
+        page,
+      };
+    }
 
-    let results = safeAnimeList(data?.Page?.media || []);
+    /* ===============================
+       TOP UPCOMING
+    ============================== */
+
+    else if (type === "top-upcoming") {
+      query = `
+        query ($page: Int) {
+          Page(page: $page, perPage: 24) {
+            pageInfo {
+              total
+              currentPage
+              lastPage
+              hasNextPage
+            }
+
+            media(
+              type: ANIME
+              status: NOT_YET_RELEASED
+              sort: POPULARITY_DESC
+              isAdult: false
+            ) {
+              ${MEDIA_FIELDS}
+            }
+          }
+        }
+      `;
+
+      variables = {
+        page,
+      };
+    }
+
+    /* ===============================
+       NORMAL CATEGORY
+    ============================== */
+
+    else {
+      query = `
+        query ($page: Int, $sort: [MediaSort], $format: MediaFormat) {
+          Page(page: $page, perPage: 24) {
+            pageInfo {
+              total
+              currentPage
+              lastPage
+              hasNextPage
+            }
+
+            media(
+              type: ANIME
+              sort: $sort
+              format: $format
+              isAdult: false
+            ) {
+              ${MEDIA_FIELDS}
+            }
+          }
+        }
+      `;
+
+      variables = {
+        page,
+        sort: sortMap[type] || "POPULARITY_DESC",
+        format: formatMap[type] || null,
+      };
+    }
+
+    const data = await anilist(query, variables);
+
+    const results = safeAnimeList(data?.Page?.media || []);
 
     res.json({
       status: "ok",
       category: type,
       page,
+
       results,
+
       paginationInfo: data?.Page?.pageInfo || {
         total: results.length,
         currentPage: page,
@@ -1842,7 +1912,6 @@ app.get("/api/category/:type", async (req, res) => {
     });
   }
 });
-
 
 /* ===============================
    TOP SEARCH
