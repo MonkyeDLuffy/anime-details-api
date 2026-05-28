@@ -459,20 +459,18 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       const results = search.data?.results || [];
       const target = normalizeTitle(cleanSearchTitle(searchTitle));
 
-      show =
-        results.find((item) => {
-          const name = normalizeTitle(item.name);
-          const originalName = normalizeTitle(item.original_name);
+     const filtered = results.filter((item) =>
+  isLikelyAnimeTmdbShow(item, details)
+);
 
-          return (
-            name === target ||
-            originalName === target ||
-            name.startsWith(target) ||
-            originalName.startsWith(target) ||
-            target.startsWith(name) ||
-            target.startsWith(originalName)
-          );
-        }) || null;
+const scored = filtered
+  .map((item) => ({
+    item,
+    score: scoreTmdbCandidate(item, details, searchTitle),
+  }))
+  .sort((a, b) => b.score - a.score);
+
+show = scored[0]?.item || null;
 
       if (show?.id) break;
     }
