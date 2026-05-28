@@ -1771,8 +1771,8 @@ app.get("/api/category/:type", async (req, res) => {
       movies: "POPULARITY_DESC",
       "tv-series": "POPULARITY_DESC",
       ovas: "POPULARITY_DESC",
-      onas: "POPULARITY_DESC",
-      specials: "POPULARITY_DESC",
+      onas: "ONA",
+      specials: "SPECIAL",
     };
 
     const formatMap = {
@@ -1823,6 +1823,51 @@ app.get("/api/category/:type", async (req, res) => {
               type: ANIME,
               status: NOT_YET_RELEASED,
               sort: POPULARITY_DESC,
+              isAdult: false
+            ) {
+              ${MEDIA_FIELDS}
+            }
+          }
+        }
+      `;
+
+      variables = { page };
+    } else if (type === "most-favorite") {
+      query = `
+        query ($page: Int) {
+          Page(page: $page, perPage: 24) {
+            pageInfo {
+              total
+              currentPage
+              lastPage
+              hasNextPage
+            }
+            media(
+              type: ANIME,
+              sort: FAVOURITES_DESC,
+              isAdult: false
+            ) {
+              ${MEDIA_FIELDS}
+            }
+          }
+        }
+      `;
+
+      variables = { page };
+    } else if (type === "latest-completed") {
+      query = `
+        query ($page: Int) {
+          Page(page: $page, perPage: 24) {
+            pageInfo {
+              total
+              currentPage
+              lastPage
+              hasNextPage
+            }
+            media(
+              type: ANIME,
+              status: FINISHED,
+              sort: END_DATE_DESC,
               isAdult: false
             ) {
               ${MEDIA_FIELDS}
