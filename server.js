@@ -1821,40 +1821,6 @@ app.get("/api/category/:type", async (req, res) => {
 
     let results = safeAnimeList(data?.Page?.media || []);
 
-    // emergency fallback: if top-airing empty, use home top_airing
-    if (type === "top-airing" && results.length === 0) {
-  const homeQuery = `
-    query ($page: Int) {
-      Page(page: $page, perPage: 24) {
-        pageInfo {
-          total
-          currentPage
-          lastPage
-          hasNextPage
-        }
-        media(
-          type: ANIME,
-          sort: POPULARITY_DESC,
-          status: RELEASING,
-          isAdult: false
-        ) {
-          ${MEDIA_FIELDS}
-        }
-      }
-    }
-  `;
-
-  const homeData = await anilist(homeQuery, { page });
-
-  results = safeAnimeList(homeData?.Page?.media || []);
-
-  data = homeData;
-}
-
-     const homeData = await anilist(homeQuery, { page });
-      results = safeAnimeList(homeData?.Page?.media || []);
-    }
-
     res.json({
       status: "ok",
       category: type,
