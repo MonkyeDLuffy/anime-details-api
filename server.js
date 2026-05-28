@@ -1382,14 +1382,6 @@ app.get("/api/health", (req, res) => {
 app.get("/api/home", async (req, res) => {
   try {
     const data = await getHomeData();
-
-    data.latest_completed = await getAnilistList({
-      page: 1,
-      perPage: 12,
-      status: "FINISHED",
-      sort: "END_DATE_DESC",
-    });
-
     res.json(data);
   } catch (error) {
     res.status(500).json({
