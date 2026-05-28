@@ -306,6 +306,82 @@ async function processQueue() {
   processingQueue = false;
 }
 
+function yearDistance(tmdbDate, animeYear) {
+  if (!tmdbDate || !animeYear) return 99;
+  const y = Number(String(tmdbDate).slice(0, 4));
+  return Math.abs(y - Number(animeYear));
+}
+
+function isLikelyAnimeTmdbShow(item, details) {
+  const name = String(item.name || item.title || "").toLowerCase();
+  const original = String(item.original_name || "").toLowerCase();
+
+  if (!item?.id) return false;
+  if (item.media_type && item.media_type !== "tv") return false;
+
+  const badWords = [
+    "live action",
+    "live-action",
+    "behind the scenes",
+    "making of",
+    "specials",
+    "documentary",
+  ];
+
+  if (badWords.some((w) => name.includes(w) || original.includes(w))) {
+    return false;
+  }
+
+  const animeYear = details.year || details.seasonYear;
+  const diff = yearDistance(item.first_air_date, animeYear);
+
+  // Japanese shows are safest
+  if (item.original_language === "ja") return true;
+
+  // Allow very close year match only if title is exact-ish
+  if (diff <= 1) return true;
+
+  return false;
+}
+
+function scoreTmdbCandidate(item, details, targetTitle) {
+  let score = 0;
+
+  const tmdbName = normalizeTmdbText(item.name);
+  const tmdbOriginal = normalizeTmdbText(item.original_name);
+  const target = normalizeTmdbText(targetTitle);
+
+  if (tmdbName === target) score += 80;
+  if (tmdbOriginal === target) score += 80;
+
+  if (tmdbName.includes(target) || target.includes(tmdbName)) score += 35;
+  if (tmdbOriginal.includes(target) || target.includes(tmdbOriginal)) score += 35;
+
+  if (item.original_language === "ja") score += 60;
+
+  const animeYear = details.year || details.seasonYear;
+  const diff = yearDistance(item.first_air_date, animeYear);
+
+  if (diff === 0) score += 35;
+  else if (diff === 1) score += 20;
+  else if (diff <= 3) score += 8;
+  else score -= 25;
+
+  score += Number(item.popularity || 0) / 10;
+
+  return score;
+}
+
+function normalizeTmdbText(value = "") {
+  return String(value)
+    .toLowerCase()
+    .replace(/season\s*\d+/gi, "")
+    .replace(/\d+(st|nd|rd|th)?\s*season/gi, "")
+    .replace(/part\s*\d+/gi, "")
+    .replace(/cour\s*\d+/gi, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
 async function getTmdbAnimeData(anilistId, forceRefresh = false) {
   try {
     const cacheKey = `tmdb-anime-${anilistId}`;
