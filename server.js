@@ -534,10 +534,10 @@ show = scored[0]?.item || null;
         groups[targetSeason - 1];
 
       episodes =
-        selectedGroup?.episodes?.map((ep, index) => ({
-          episodeNumber: index + 1,
-          seasonNumber: targetSeason,
-          tmdbEpisodeNumber: ep.episode_number,
+  selectedGroup?.episodes?.map((ep) => ({
+    episodeNumber: ep.order || ep.episode_number,
+    seasonNumber: targetSeason,
+    tmdbEpisodeNumber: ep.episode_number,
           title: ep.name,
           image: ep.still_path ? `${TMDB_IMAGE}${ep.still_path}` : null,
           overview: ep.overview || "",
