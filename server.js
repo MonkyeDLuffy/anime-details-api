@@ -1736,18 +1736,19 @@ app.get("/api/seasons/:id", async (req, res) => {
 ================================ */
 
 app.get("/api/category/:type", async (req, res) => {
-  const type = req.params.type;
-  const page = Number(req.query.page || 1);
+  const type = String(req.params.type || "").trim();
+  const page = Math.max(1, Number(req.query.page || 1));
 
   try {
     const sortMap = {
       "recently-added": "START_DATE_DESC",
+      "recently-updated": "UPDATED_AT_DESC",
       "most-popular": "POPULARITY_DESC",
       movies: "POPULARITY_DESC",
       "tv-series": "POPULARITY_DESC",
       ovas: "POPULARITY_DESC",
-      onas: "ONA",
-      specials: "SPECIAL",
+      onas: "POPULARITY_DESC",
+      specials: "POPULARITY_DESC",
     };
 
     const formatMap = {
@@ -1759,9 +1760,50 @@ app.get("/api/category/:type", async (req, res) => {
     };
 
     let query;
-    let variables;
+    let variables = { page };
 
-    if (type === "top-airing") {
+    if (type === "genre") {
+      const genre = String(req.query.genre || "").trim();
+
+      if (!genre) {
+        return res.json({
+          status: "ok",
+          category: "genre",
+          genre: "",
+          page,
+          results: [],
+          paginationInfo: {
+            total: 0,
+            currentPage: page,
+            lastPage: 1,
+            hasNextPage: false,
+          },
+        });
+      }
+
+      query = `
+        query ($page: Int, $genre: String) {
+          Page(page: $page, perPage: 24) {
+            pageInfo {
+              total
+              currentPage
+              lastPage
+              hasNextPage
+            }
+            media(
+              type: ANIME,
+              genre: $genre,
+              sort: POPULARITY_DESC,
+              isAdult: false
+            ) {
+              ${MEDIA_FIELDS}
+            }
+          }
+        }
+      `;
+
+      variables = { page, genre };
+    } else if (type === "top-airing") {
       query = `
         query ($page: Int) {
           Page(page: $page, perPage: 24) {
@@ -1782,8 +1824,6 @@ app.get("/api/category/:type", async (req, res) => {
           }
         }
       `;
-
-      variables = { page };
     } else if (type === "top-upcoming") {
       query = `
         query ($page: Int) {
@@ -1805,8 +1845,6 @@ app.get("/api/category/:type", async (req, res) => {
           }
         }
       `;
-
-      variables = { page };
     } else if (type === "most-favorite") {
       query = `
         query ($page: Int) {
@@ -1827,8 +1865,6 @@ app.get("/api/category/:type", async (req, res) => {
           }
         }
       `;
-
-      variables = { page };
     } else if (type === "latest-completed") {
       query = `
         query ($page: Int) {
@@ -1850,8 +1886,6 @@ app.get("/api/category/:type", async (req, res) => {
           }
         }
       `;
-
-      variables = { page };
     } else {
       query = `
         query ($page: Int, $sort: [MediaSort], $format: MediaFormat) {
@@ -1884,9 +1918,10 @@ app.get("/api/category/:type", async (req, res) => {
     const data = await anilist(query, variables);
     const results = safeAnimeList(data?.Page?.media || []);
 
-    res.json({
+    return res.json({
       status: "ok",
       category: type,
+      genre: type === "genre" ? variables.genre : undefined,
       page,
       results,
       paginationInfo: data?.Page?.pageInfo || {
@@ -1897,7 +1932,7 @@ app.get("/api/category/:type", async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       status: "error",
       error: "Category failed",
       debug: error.message,
