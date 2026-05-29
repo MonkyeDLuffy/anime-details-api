@@ -1097,10 +1097,7 @@ async function getAnimeEpisodes(anilistId, forceRefresh = false) {
 
 async function getHomeData() {
   try {
-    const cached = await getSupabaseCache(
-      "home_cache",
-      "home-main"
-    );
+    const cached = await getSupabaseCache("home_cache", "home-main");
 
     if (cached?.fresh) {
       console.log("✅ HOME CACHE HIT");
@@ -1110,42 +1107,43 @@ async function getHomeData() {
     const query = `
       query {
         trending: Page(page: 1, perPage: 12) {
-          media(
-            type: ANIME,
-            sort: TRENDING_DESC,
-            ${SAFE_FILTER}
-          ) {
+          media(type: ANIME, sort: TRENDING_DESC, ${SAFE_FILTER}) {
             ${MEDIA_FIELDS}
           }
         }
 
         popular: Page(page: 1, perPage: 12) {
-          media(
-            type: ANIME,
-            sort: POPULARITY_DESC,
-            ${SAFE_FILTER}
-          ) {
+          media(type: ANIME, sort: POPULARITY_DESC, ${SAFE_FILTER}) {
             ${MEDIA_FIELDS}
           }
         }
 
         airing: Page(page: 1, perPage: 12) {
-          media(
-            type: ANIME,
-            status: RELEASING,
-            sort: POPULARITY_DESC,
-            ${SAFE_FILTER}
-          ) {
+          media(type: ANIME, status: RELEASING, sort: POPULARITY_DESC, ${SAFE_FILTER}) {
             ${MEDIA_FIELDS}
           }
         }
 
         latest: Page(page: 1, perPage: 20) {
-          media(
-            type: ANIME,
-            sort: START_DATE_DESC,
-            ${SAFE_FILTER}
-          ) {
+          media(type: ANIME, sort: START_DATE_DESC, ${SAFE_FILTER}) {
+            ${MEDIA_FIELDS}
+          }
+        }
+
+        completed: Page(page: 1, perPage: 12) {
+          media(type: ANIME, status: FINISHED, sort: END_DATE_DESC, ${SAFE_FILTER}) {
+            ${MEDIA_FIELDS}
+          }
+        }
+
+        favorite: Page(page: 1, perPage: 12) {
+          media(type: ANIME, sort: FAVOURITES_DESC, ${SAFE_FILTER}) {
+            ${MEDIA_FIELDS}
+          }
+        }
+
+        upcoming: Page(page: 1, perPage: 12) {
+          media(type: ANIME, status: NOT_YET_RELEASED, sort: POPULARITY_DESC, ${SAFE_FILTER}) {
             ${MEDIA_FIELDS}
           }
         }
@@ -1155,56 +1153,25 @@ async function getHomeData() {
     const data = await anilist(query);
 
     const finalData = {
-      spotlights: safeAnimeList(
-        data?.trending?.media || []
-      ),
-
-      trending: safeAnimeList(
-        data?.trending?.media || []
-      ),
-
-      top_airing: safeAnimeList(
-        data?.airing?.media || []
-      ),
-
-      most_popular: safeAnimeList(
-        data?.popular?.media || []
-      ),
-
-      latest_episode: safeAnimeList(
-        data?.latest?.media || []
-      ),
-
-      recently_added: safeAnimeList(
-        data?.latest?.media || []
-      ),
-
-      latest_completed: [],
-
-      most_favorite: safeAnimeList(
-        data?.popular?.media || []
-      ),
-
-      top_upcoming: [],
-
+      spotlights: safeAnimeList(data?.trending?.media || []),
+      trending: safeAnimeList(data?.trending?.media || []),
+      top_airing: safeAnimeList(data?.airing?.media || []),
+      most_popular: safeAnimeList(data?.popular?.media || []),
+      latest_episode: safeAnimeList(data?.latest?.media || []),
+      recently_added: safeAnimeList(data?.latest?.media || []),
+      latest_completed: safeAnimeList(data?.completed?.media || []),
+      most_favorite: safeAnimeList(data?.favorite?.media || []),
+      top_upcoming: safeAnimeList(data?.upcoming?.media || []),
       todaySchedule: [],
       genres: [],
       topten: [],
     };
 
-    await setSupabaseCache(
-      "home_cache",
-      "home-main",
-      finalData,
-      TTL.HOME
-    );
+    await setSupabaseCache("home_cache", "home-main", finalData, TTL.HOME);
 
     return finalData;
   } catch (error) {
-    console.log(
-      "Home error:",
-      error?.response?.status || error.message
-    );
+    console.log("Home error:", error?.response?.status || error.message);
 
     return {
       spotlights: [],
