@@ -528,14 +528,30 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
 
     let matchedSeasonNumber = 1;
 
-    if (
-      wantedSeason &&
-      seasons.some((s) => Number(s.season_number) === Number(wantedSeason))
-    ) {
+if (wantedSeason) {
+  // Try requested season directly first, even if TMDB seasons list is incomplete
+  try {
+    const testSeason = await axios.get(
+      `${TMDB}/tv/${bestShow.id}/season/${wantedSeason}`,
+      {
+        params: {
+          api_key: process.env.TMDB_API_KEY,
+        },
+        timeout: 15000,
+      }
+    );
+
+    if (Array.isArray(testSeason.data?.episodes) && testSeason.data.episodes.length > 0) {
       matchedSeasonNumber = Number(wantedSeason);
     } else {
       matchedSeasonNumber = Number(seasons[0]?.season_number || 1);
     }
+  } catch {
+    matchedSeasonNumber = Number(seasons[0]?.season_number || 1);
+  }
+} else {
+  matchedSeasonNumber = Number(seasons[0]?.season_number || 1);
+}
 
     let episodes = [];
 
