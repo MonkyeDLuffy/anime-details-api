@@ -388,10 +388,7 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
 
     if (!forceRefresh) {
       const cached = await getSupabaseCache("search_cache", cacheKey);
-      if (cached?.fresh) {
-        console.log("✅ TMDB CACHE HIT:", anilistId);
-        return cached.data;
-      }
+      if (cached?.fresh) return cached.data;
     }
 
     const details = await getAnimeDetails(anilistId);
@@ -399,50 +396,41 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
 
     const title = details.title || details.name || "Anime";
 
-    const cleanText = (value = "") =>
+    const extractSeasonNumber = (value = "") => {
+      const text = String(value).toLowerCase();
+
+      const words = {
+        first: 1, second: 2, third: 3, fourth: 4, fifth: 5,
+        sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10,
+      };
+
+      for (const [word, num] of Object.entries(words)) {
+        if (text.includes(`${word} season`)) return num;
+      }
+
+      const m =
+        text.match(/season\s*(\d+)/i) ||
+        text.match(/(\d+)(st|nd|rd|th)?\s*season/i) ||
+        text.match(/\bs(\d+)\b/i);
+
+      return m?.[1] ? Number(m[1]) : null;
+    };
+
+    const cleanBaseTitle = (value = "") =>
       String(value)
-        .toLowerCase()
         .replace(/season\s*\d+/gi, "")
         .replace(/\d+(st|nd|rd|th)?\s*season/gi, "")
         .replace(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+season\b/gi, "")
         .replace(/\s+part\s+\d+/gi, "")
         .replace(/\s+cour\s+\d+/gi, "")
-        .replace(/[^a-z0-9]+/g, " ")
+        .replace(/[:\-–—]+$/g, "")
         .trim();
 
-    const extractSeasonNumber = (value = "") => {
-      const text = String(value).toLowerCase();
-
-      const wordMap = {
-        first: 1,
-        second: 2,
-        third: 3,
-        fourth: 4,
-        fifth: 5,
-        sixth: 6,
-        seventh: 7,
-        eighth: 8,
-        ninth: 9,
-        tenth: 10,
-      };
-
-      for (const [word, num] of Object.entries(wordMap)) {
-        if (text.includes(`${word} season`)) return num;
-      }
-
-      const patterns = [
-        /season\s*(\d+)/i,
-        /(\d+)(st|nd|rd|th)?\s*season/i,
-        /\bs(\d+)\b/i,
-      ];
-
-      for (const pattern of patterns) {
-        const match = text.match(pattern);
-        if (match?.[1]) return Number(match[1]);
-      }
-
-      return null;
-    };
+    const normalize = (v = "") =>
+      String(v)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
 
     const rawTitles = [
       details.title,
@@ -458,17 +446,20 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
     const wantedSeason =
       rawTitles.map(extractSeasonNumber).find(Boolean) || null;
 
-    const possibleTitles = [
-      ...new Set(
-        rawTitles
-          .flatMap((t) => [String(t).trim(), cleanText(t)])
-          .filter(Boolean)
-      ),
+    const exactTitles = [...new Set(rawTitles.map(String).map((x) => x.trim()))];
+
+    const baseTitles = [
+      ...new Set(exactTitles.map(cleanBaseTitle).filter(Boolean)),
     ];
 
-    let show = null;
+    const searchTitles = wantedSeason
+      ? [...exactTitles, ...baseTitles]
+      : [...baseTitles, ...exactTitles];
 
-    for (const searchTitle of possibleTitles) {
+    let bestShow = null;
+    let bestScore = -999;
+
+    for (const searchTitle of searchTitles) {
       const search = await axios.get(`${TMDB}/search/tv`, {
         params: {
           api_key: process.env.TMDB_API_KEY,
@@ -479,22 +470,28 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
 
       const results = search.data?.results || [];
 
-      const filtered = results.filter((item) =>
-        isLikelyAnimeTmdbShow(item, details)
-      );
+      for (const item of results) {
+        if (!isLikelyAnimeTmdbShow(item, details)) continue;
 
-      const scored = filtered
-        .map((item) => ({
-          item,
-          score: scoreTmdbCandidate(item, details, searchTitle),
-        }))
-        .sort((a, b) => b.score - a.score);
+        const itemName = normalize(item.name || item.original_name || "");
+        const exactName = normalize(searchTitle);
+        const baseName = normalize(cleanBaseTitle(searchTitle));
 
-      show = scored[0]?.item || null;
-      if (show?.id) break;
+        let score = scoreTmdbCandidate(item, details, searchTitle);
+
+        if (itemName === exactName) score += 200;
+        if (wantedSeason && itemName.includes(`season ${wantedSeason}`)) score += 180;
+        if (wantedSeason && itemName.includes(baseName)) score += 60;
+        if (wantedSeason && !itemName.includes(`season ${wantedSeason}`)) score -= 40;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestShow = item;
+        }
+      }
     }
 
-    if (!show?.id) {
+    if (!bestShow?.id) {
       const emptyData = {
         tmdbId: null,
         imdbId: null,
@@ -508,7 +505,7 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       return emptyData;
     }
 
-    const tv = await axios.get(`${TMDB}/tv/${show.id}`, {
+    const tv = await axios.get(`${TMDB}/tv/${bestShow.id}`, {
       params: {
         api_key: process.env.TMDB_API_KEY,
         append_to_response: "images,external_ids",
@@ -526,7 +523,7 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       tvData?.images?.logos?.[0];
 
     const seasons = (tvData?.seasons || [])
-      .filter((season) => Number(season.season_number) > 0)
+      .filter((s) => Number(s.season_number) > 0)
       .sort((a, b) => Number(a.season_number) - Number(b.season_number));
 
     let matchedSeasonNumber = 1;
@@ -537,65 +534,42 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
     ) {
       matchedSeasonNumber = Number(wantedSeason);
     } else {
-      const animeYear =
-        Number(details.year) ||
-        Number(details.seasonYear) ||
-        Number(details.startDate?.year) ||
-        null;
-
-      const yearMatch = seasons.find((s) => {
-        const y = s.air_date ? Number(String(s.air_date).slice(0, 4)) : null;
-        return animeYear && y === animeYear;
-      });
-
-      if (yearMatch) {
-        matchedSeasonNumber = Number(yearMatch.season_number);
-      } else {
-        matchedSeasonNumber = Number(seasons[0]?.season_number || 1);
-      }
+      matchedSeasonNumber = Number(seasons[0]?.season_number || 1);
     }
 
     let episodes = [];
 
-    try {
-      const seasonRes = await axios.get(
-        `${TMDB}/tv/${show.id}/season/${matchedSeasonNumber}`,
-        {
-          params: {
-            api_key: process.env.TMDB_API_KEY,
-          },
-          timeout: 20000,
-        }
-      );
+    const seasonRes = await axios.get(
+      `${TMDB}/tv/${bestShow.id}/season/${matchedSeasonNumber}`,
+      {
+        params: {
+          api_key: process.env.TMDB_API_KEY,
+        },
+        timeout: 20000,
+      }
+    );
 
-      const seasonEpisodes = seasonRes.data?.episodes || [];
-
-      episodes = seasonEpisodes.map((ep) => ({
-        episodeNumber: ep.episode_number,
-        seasonNumber: matchedSeasonNumber,
-        tmdbEpisodeNumber: ep.episode_number,
-        title: ep.name || `Episode ${ep.episode_number}`,
-        image: ep.still_path ? `${TMDB_IMAGE}${ep.still_path}` : null,
-        overview: ep.overview || "",
-      }));
-    } catch (seasonError) {
-      console.log(
-        `TMDB season fetch failed: ${show.id} season ${matchedSeasonNumber}`,
-        seasonError.message
-      );
-    }
+    episodes = (seasonRes.data?.episodes || []).map((ep) => ({
+      episodeNumber: ep.episode_number,
+      seasonNumber: matchedSeasonNumber,
+      tmdbEpisodeNumber: ep.episode_number,
+      title: ep.name || `Episode ${ep.episode_number}`,
+      image: ep.still_path ? `${TMDB_IMAGE}${ep.still_path}` : null,
+      overview: ep.overview || "",
+    }));
 
     const finalData = {
-      tmdbId: show.id,
+      tmdbId: bestShow.id,
       imdbId: tvData?.external_ids?.imdb_id || null,
       title,
+      tmdbTitle: tvData?.name || bestShow.name || null,
       logo: logo?.file_path ? `${TMDB_IMAGE}${logo.file_path}` : null,
       seasonNumber: matchedSeasonNumber,
+      wantedSeason,
       episodes,
     };
 
     await setSupabaseCache("search_cache", cacheKey, finalData, TTL.TMDB);
-
     return finalData;
   } catch (error) {
     console.log("TMDB error:", error.message);
