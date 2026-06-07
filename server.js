@@ -482,11 +482,7 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       rawTitles.map(extractSeasonNumber).find(Boolean) || null;
 
     const exactTitles = [...new Set(rawTitles.map(String).map((x) => x.trim()))];
-
-    const baseTitles = [
-      ...new Set(exactTitles.map(cleanBaseTitle).filter(Boolean)),
-    ];
-
+    const baseTitles = [...new Set(exactTitles.map(cleanBaseTitle).filter(Boolean))];
     const searchTitles = [...baseTitles, ...exactTitles];
 
     let bestShow = null;
@@ -553,19 +549,19 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       tvData?.images?.logos?.find((x) => !x.iso_639_1) ||
       tvData?.images?.logos?.[0];
 
-    let jikanEpisodes = [];
+    let localEpisodes = [];
 
     if (details.malId) {
       let page = 1;
       let hasNextPage = true;
 
-      while (hasNextPage && page <= 5) {
+      while (hasNextPage && page <= 10) {
         try {
           const epRes = await jikanGet(`/anime/${details.malId}/episodes`, {
             page,
           });
 
-          jikanEpisodes.push(...(epRes?.data || []));
+          localEpisodes.push(...(epRes?.data || []));
 
           hasNextPage = Boolean(epRes?.pagination?.has_next_page);
           page++;
@@ -577,7 +573,10 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       }
     }
 
-    const jikanTitles = jikanEpisodes
+    const localEpisodeCount =
+      localEpisodes.length || Number(details.episodes || details.totalEpisodes || 0) || 0;
+
+    const localTitles = localEpisodes
       .map((ep) => ep.title || ep.title_japanese)
       .filter(Boolean);
 
@@ -585,8 +584,7 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       .filter((s) => Number(s.season_number) > 0)
       .sort((a, b) => Number(a.season_number) - Number(b.season_number));
 
-    let bestSeason = null;
-    let bestSeasonScore = -999;
+    let allTmdbEpisodes = [];
 
     for (const season of seasons) {
       try {
@@ -601,77 +599,141 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
         );
 
         const tmdbEpisodes = seasonRes.data?.episodes || [];
-        if (!tmdbEpisodes.length) continue;
 
-        let score = 0;
-
-        for (const jTitle of jikanTitles) {
-          let bestEpisodeTitleScore = 0;
-
-          for (const tmdbEp of tmdbEpisodes) {
-            bestEpisodeTitleScore = Math.max(
-              bestEpisodeTitleScore,
-              titleMatchScore(jTitle, tmdbEp.name)
-            );
-          }
-
-          score += bestEpisodeTitleScore;
-        }
-
-        const animeYear = Number(details.year || details.seasonYear || 0);
-        const seasonYear = Number(String(season.air_date || "").slice(0, 4));
-
-        if (animeYear && seasonYear) {
-          const diff = Math.abs(animeYear - seasonYear);
-
-          if (diff === 0) score += 120;
-          else if (diff === 1) score += 60;
-          else if (diff <= 2) score += 20;
-          else score -= 40;
-        }
-
-        if (wantedSeason && Number(season.season_number) === Number(wantedSeason)) {
-          score += 20;
-        }
-
-        if (score > bestSeasonScore) {
-          bestSeasonScore = score;
-          bestSeason = {
-            seasonNumber: Number(season.season_number),
-            episodes: tmdbEpisodes,
-          };
-        }
-      } catch (err) {
+        allTmdbEpisodes.push(
+          ...tmdbEpisodes.map((ep) => ({
+            ...ep,
+            realSeasonNumber: Number(season.season_number),
+          }))
+        );
+      } catch {
         console.log("TMDB season fetch failed:", season.season_number);
       }
     }
 
-    if (!bestSeason?.episodes?.length) {
+    allTmdbEpisodes = allTmdbEpisodes
+      .filter((ep) => ep?.episode_number)
+      .sort((a, b) => {
+        const dateA = new Date(a.air_date || "1900-01-01").getTime();
+        const dateB = new Date(b.air_date || "1900-01-01").getTime();
+
+        if (dateA !== dateB) return dateA - dateB;
+
+        return Number(a.episode_number) - Number(b.episode_number);
+      });
+
+    if (!allTmdbEpisodes.length) {
       const emptyData = {
         tmdbId: bestShow.id,
         imdbId: tvData?.external_ids?.imdb_id || null,
         title,
         tmdbTitle: tvData?.name || bestShow.name || null,
         logo: logo?.file_path ? `${TMDB_IMAGE}${logo.file_path}` : null,
-        seasonNumber: null,
-        wantedSeason,
+        seasonNumber: wantedSeason || null,
         episodes: [],
-        warning: "No matching TMDB season found.",
+        warning: "TMDB episodes not found.",
       };
 
       await setSupabaseCache("search_cache", cacheKey, emptyData, TTL.TMDB);
       return emptyData;
     }
 
-    const episodes = bestSeason.episodes.map((ep) => ({
-      episodeNumber: ep.episode_number,
-      seasonNumber: bestSeason.seasonNumber,
-      tmdbEpisodeNumber: ep.episode_number,
-      title: ep.name || `Episode ${ep.episode_number}`,
-      image: ep.still_path ? `${TMDB_IMAGE}${ep.still_path}` : null,
-      overview: ep.overview || "",
-      airDate: ep.air_date || null,
-    }));
+    let startIndex = -1;
+    let bestStartScore = -999;
+
+    const maxStart = Math.max(0, allTmdbEpisodes.length - Math.max(localEpisodeCount, 1));
+
+    for (let i = 0; i <= maxStart; i++) {
+      let score = 0;
+
+      const compareLimit = Math.min(localTitles.length, localEpisodeCount || 12, 12);
+
+      for (let j = 0; j < compareLimit; j++) {
+        const localTitle = localTitles[j];
+        const tmdbTitle = allTmdbEpisodes[i + j]?.name;
+
+        if (localTitle && tmdbTitle) {
+          score += titleMatchScore(localTitle, tmdbTitle);
+        }
+      }
+
+      const animeYear = Number(details.year || details.seasonYear || 0);
+      const firstAirYear = Number(String(allTmdbEpisodes[i]?.air_date || "").slice(0, 4));
+
+      if (animeYear && firstAirYear) {
+        const diff = Math.abs(animeYear - firstAirYear);
+
+        if (diff === 0) score += 150;
+        else if (diff === 1) score += 80;
+        else if (diff <= 2) score += 30;
+        else score -= 50;
+      }
+
+      if (score > bestStartScore) {
+        bestStartScore = score;
+        startIndex = i;
+      }
+    }
+
+    // Manual safety map for Re:ZERO Season 4.
+    // TMDB stores it under Season 1 with absolute episode numbers.
+    if (Number(anilistId) === 189046) {
+      const manualIndex = allTmdbEpisodes.findIndex(
+        (ep) =>
+          Number(ep.realSeasonNumber) === 1 &&
+          Number(ep.episode_number) === 67
+      );
+
+      if (manualIndex !== -1) {
+        startIndex = manualIndex;
+      }
+    }
+
+    if (startIndex < 0) startIndex = 0;
+
+    const selectedTmdbEpisodes = allTmdbEpisodes.slice(
+      startIndex,
+      startIndex + Math.max(localEpisodeCount, 1)
+    );
+
+    const episodes = selectedTmdbEpisodes.map((tmdbEp, index) => {
+      const localEp = localEpisodes[index];
+
+      const localNumber =
+        Number(localEp?.mal_id) ||
+        Number(localEp?.episodeNumber) ||
+        Number(localEp?.number) ||
+        index + 1;
+
+      return {
+        episodeNumber: localNumber,
+        seasonNumber: wantedSeason || null,
+        tmdbSeasonNumber: tmdbEp?.realSeasonNumber || null,
+        tmdbEpisodeNumber: tmdbEp?.episode_number || null,
+
+        title:
+          localEp?.title ||
+          localEp?.title_japanese ||
+          tmdbEp?.name ||
+          `Episode ${index + 1}`,
+
+        tmdbTitle: tmdbEp?.name || null,
+
+        image: tmdbEp?.still_path
+          ? `${TMDB_IMAGE}${tmdbEp.still_path}`
+          : null,
+
+        overview:
+          tmdbEp?.overview ||
+          localEp?.synopsis ||
+          "",
+
+        airDate:
+          tmdbEp?.air_date ||
+          localEp?.aired ||
+          null,
+      };
+    });
 
     const finalData = {
       tmdbId: bestShow.id,
@@ -679,9 +741,13 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       title,
       tmdbTitle: tvData?.name || bestShow.name || null,
       logo: logo?.file_path ? `${TMDB_IMAGE}${logo.file_path}` : null,
-      seasonNumber: bestSeason.seasonNumber,
+
+      seasonNumber: wantedSeason || null,
+      tmdbSeasonNumber: selectedTmdbEpisodes[0]?.realSeasonNumber || null,
+      tmdbStartEpisode: selectedTmdbEpisodes[0]?.episode_number || null,
       wantedSeason,
-      matchScore: bestSeasonScore,
+
+      matchScore: bestStartScore,
       episodes,
     };
 
