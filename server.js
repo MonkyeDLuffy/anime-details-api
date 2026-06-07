@@ -526,10 +526,9 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       .filter((s) => Number(s.season_number) > 0)
       .sort((a, b) => Number(a.season_number) - Number(b.season_number));
 
-    let matchedSeasonNumber = 1;
+   let matchedSeasonNumber = null;
 
 if (wantedSeason) {
-  // Try requested season directly first, even if TMDB seasons list is incomplete
   try {
     const testSeason = await axios.get(
       `${TMDB}/tv/${bestShow.id}/season/${wantedSeason}`,
@@ -541,18 +540,40 @@ if (wantedSeason) {
       }
     );
 
-    if (Array.isArray(testSeason.data?.episodes) && testSeason.data.episodes.length > 0) {
+    if (
+      Array.isArray(testSeason.data?.episodes) &&
+      testSeason.data.episodes.length > 0
+    ) {
       matchedSeasonNumber = Number(wantedSeason);
-    } else {
-      matchedSeasonNumber = Number(seasons[0]?.season_number || 1);
     }
   } catch {
-    matchedSeasonNumber = Number(seasons[0]?.season_number || 1);
+    matchedSeasonNumber = null;
   }
-} else {
-  matchedSeasonNumber = Number(seasons[0]?.season_number || 1);
 }
 
+// IMPORTANT:
+// Never fallback to Season 1 when anime title clearly wants Season 2/3/4/etc.
+// Wrong images are worse than no images.
+if (!matchedSeasonNumber && wantedSeason) {
+  const emptyData = {
+    tmdbId: bestShow.id,
+    imdbId: tvData?.external_ids?.imdb_id || null,
+    title,
+    tmdbTitle: tvData?.name || bestShow.name || null,
+    logo: logo?.file_path ? `${TMDB_IMAGE}${logo.file_path}` : null,
+    seasonNumber: null,
+    wantedSeason,
+    episodes: [],
+    warning: `TMDB season ${wantedSeason} not found, so episode images were skipped to avoid showing wrong season images.`,
+  };
+
+  await setSupabaseCache("search_cache", cacheKey, emptyData, TTL.TMDB);
+  return emptyData;
+}
+
+if (!matchedSeasonNumber) {
+  matchedSeasonNumber = Number(seasons[0]?.season_number || 1);
+}
     let episodes = [];
 
     const seasonRes = await axios.get(
