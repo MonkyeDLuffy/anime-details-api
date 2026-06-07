@@ -382,9 +382,12 @@ function normalizeTmdbText(value = "") {
     .replace(/[^a-z0-9]/g, "");
 }
 
-async function getTmdbAnimeData(anilistId, forceRefresh = false) {
+async function getTmdbAnimeData(anilistId, forceRefresh = false, rangeStart = 1, rangeEnd = 100) {
   try {
-    const cacheKey = `tmdb-anime-${anilistId}`;
+    rangeStart = Math.max(1, Number(rangeStart || 1));
+    rangeEnd = Math.max(rangeStart, Number(rangeEnd || rangeStart + 99));
+
+    const cacheKey = `tmdb-anime-${anilistId}-${rangeStart}-${rangeEnd}`;
 
     if (!forceRefresh) {
       const cached = await getSupabaseCache("search_cache", cacheKey);
@@ -396,20 +399,22 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
 
     const title = details.title || details.name || "Anime";
 
+    const cleanBaseTitle = (value = "") =>
+      String(value)
+        .replace(/season\s*\d+/gi, "")
+        .replace(/\d+(st|nd|rd|th)?\s*season/gi, "")
+        .replace(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+season\b/gi, "")
+        .replace(/\s+part\s+\d+/gi, "")
+        .replace(/\s+cour\s+\d+/gi, "")
+        .replace(/[:\-–—]+$/g, "")
+        .trim();
+
     const extractSeasonNumber = (value = "") => {
       const text = String(value).toLowerCase();
 
       const words = {
-        first: 1,
-        second: 2,
-        third: 3,
-        fourth: 4,
-        fifth: 5,
-        sixth: 6,
-        seventh: 7,
-        eighth: 8,
-        ninth: 9,
-        tenth: 10,
+        first: 1, second: 2, third: 3, fourth: 4, fifth: 5,
+        sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10,
       };
 
       for (const [word, num] of Object.entries(words)) {
@@ -424,49 +429,6 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       return m?.[1] ? Number(m[1]) : null;
     };
 
-    const cleanBaseTitle = (value = "") =>
-      String(value)
-        .replace(/season\s*\d+/gi, "")
-        .replace(/\d+(st|nd|rd|th)?\s*season/gi, "")
-        .replace(
-          /\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+season\b/gi,
-          ""
-        )
-        .replace(/\s+part\s+\d+/gi, "")
-        .replace(/\s+cour\s+\d+/gi, "")
-        .replace(/[:\-–—]+$/g, "")
-        .trim();
-
-    const normalize = (v = "") =>
-      String(v)
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, " ")
-        .trim();
-
-    const simple = (v = "") =>
-      String(v)
-        .toLowerCase()
-        .replace(/[^a-z0-9]/g, "");
-
-    const titleMatchScore = (a = "", b = "") => {
-      const x = simple(a);
-      const y = simple(b);
-
-      if (!x || !y) return 0;
-      if (x === y) return 100;
-      if (x.includes(y) || y.includes(x)) return 70;
-
-      const ax = new Set(normalize(a).split(" ").filter(Boolean));
-      const by = new Set(normalize(b).split(" ").filter(Boolean));
-
-      let same = 0;
-      for (const word of ax) {
-        if (by.has(word)) same++;
-      }
-
-      return same * 12;
-    };
-
     const rawTitles = [
       details.title,
       details.name,
@@ -478,12 +440,14 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       details.titleNative,
     ].filter(Boolean);
 
-    const wantedSeason =
-      rawTitles.map(extractSeasonNumber).find(Boolean) || null;
+    const wantedSeason = rawTitles.map(extractSeasonNumber).find(Boolean) || null;
 
-    const exactTitles = [...new Set(rawTitles.map(String).map((x) => x.trim()))];
-    const baseTitles = [...new Set(exactTitles.map(cleanBaseTitle).filter(Boolean))];
-    const searchTitles = [...baseTitles, ...exactTitles];
+    const searchTitles = [
+      ...new Set([
+        ...rawTitles.map(cleanBaseTitle),
+        ...rawTitles,
+      ].filter(Boolean)),
+    ];
 
     let bestShow = null;
     let bestScore = -999;
@@ -497,15 +461,10 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
         timeout: 15000,
       });
 
-      const results = search.data?.results || [];
-
-      for (const item of results) {
+      for (const item of search.data?.results || []) {
         if (!isLikelyAnimeTmdbShow(item, details)) continue;
 
         let score = scoreTmdbCandidate(item, details, searchTitle);
-
-        score += titleMatchScore(item.name, searchTitle);
-        score += titleMatchScore(item.original_name, searchTitle);
 
         if (item.original_language === "ja") score += 50;
 
@@ -521,9 +480,9 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
         tmdbId: null,
         imdbId: null,
         title,
-        logo: null,
-        seasonNumber: null,
-        wantedSeason,
+        seasonNumber: wantedSeason,
+        rangeStart,
+        rangeEnd,
         episodes: [],
         warning: "TMDB show not found.",
       };
@@ -548,37 +507,6 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       tvData?.images?.logos?.find((x) => x.iso_639_1 === "ja") ||
       tvData?.images?.logos?.find((x) => !x.iso_639_1) ||
       tvData?.images?.logos?.[0];
-
-    let localEpisodes = [];
-
-    if (details.malId) {
-      let page = 1;
-      let hasNextPage = true;
-
-      while (hasNextPage && page <= 10) {
-        try {
-          const epRes = await jikanGet(`/anime/${details.malId}/episodes`, {
-            page,
-          });
-
-          localEpisodes.push(...(epRes?.data || []));
-
-          hasNextPage = Boolean(epRes?.pagination?.has_next_page);
-          page++;
-
-          if (hasNextPage) await sleep(700);
-        } catch {
-          hasNextPage = false;
-        }
-      }
-    }
-
-    const localEpisodeCount =
-      localEpisodes.length || Number(details.episodes || details.totalEpisodes || 0) || 0;
-
-    const localTitles = localEpisodes
-      .map((ep) => ep.title || ep.title_japanese)
-      .filter(Boolean);
 
     const seasons = (tvData?.seasons || [])
       .filter((s) => Number(s.season_number) > 0)
@@ -622,118 +550,31 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
         return Number(a.episode_number) - Number(b.episode_number);
       });
 
-    if (!allTmdbEpisodes.length) {
-      const emptyData = {
-        tmdbId: bestShow.id,
-        imdbId: tvData?.external_ids?.imdb_id || null,
-        title,
-        tmdbTitle: tvData?.name || bestShow.name || null,
-        logo: logo?.file_path ? `${TMDB_IMAGE}${logo.file_path}` : null,
-        seasonNumber: wantedSeason || null,
-        episodes: [],
-        warning: "TMDB episodes not found.",
-      };
+    const selectedTmdbEpisodes = allTmdbEpisodes.slice(rangeStart - 1, rangeEnd);
 
-      await setSupabaseCache("search_cache", cacheKey, emptyData, TTL.TMDB);
-      return emptyData;
-    }
+    const episodes = [];
 
-    let startIndex = -1;
-    let bestStartScore = -999;
+    for (let epNum = rangeStart; epNum <= rangeEnd; epNum++) {
+      const index = epNum - rangeStart;
+      const tmdbEp = selectedTmdbEpisodes[index];
 
-    const maxStart = Math.max(0, allTmdbEpisodes.length - Math.max(localEpisodeCount, 1));
-
-    for (let i = 0; i <= maxStart; i++) {
-      let score = 0;
-
-      const compareLimit = Math.min(localTitles.length, localEpisodeCount || 12, 12);
-
-      for (let j = 0; j < compareLimit; j++) {
-        const localTitle = localTitles[j];
-        const tmdbTitle = allTmdbEpisodes[i + j]?.name;
-
-        if (localTitle && tmdbTitle) {
-          score += titleMatchScore(localTitle, tmdbTitle);
-        }
-      }
-
-      const animeYear = Number(details.year || details.seasonYear || 0);
-      const firstAirYear = Number(String(allTmdbEpisodes[i]?.air_date || "").slice(0, 4));
-
-      if (animeYear && firstAirYear) {
-        const diff = Math.abs(animeYear - firstAirYear);
-
-        if (diff === 0) score += 150;
-        else if (diff === 1) score += 80;
-        else if (diff <= 2) score += 30;
-        else score -= 50;
-      }
-
-      if (score > bestStartScore) {
-        bestStartScore = score;
-        startIndex = i;
-      }
-    }
-
-    // Manual safety map for Re:ZERO Season 4.
-    // TMDB stores it under Season 1 with absolute episode numbers.
-    if (Number(anilistId) === 189046) {
-      const manualIndex = allTmdbEpisodes.findIndex(
-        (ep) =>
-          Number(ep.realSeasonNumber) === 1 &&
-          Number(ep.episode_number) === 67
-      );
-
-      if (manualIndex !== -1) {
-        startIndex = manualIndex;
-      }
-    }
-
-    if (startIndex < 0) startIndex = 0;
-
-    const selectedTmdbEpisodes = allTmdbEpisodes.slice(
-      startIndex,
-      startIndex + Math.max(localEpisodeCount, 1)
-    );
-
-    const episodes = selectedTmdbEpisodes.map((tmdbEp, index) => {
-      const localEp = localEpisodes[index];
-
-      const localNumber =
-        Number(localEp?.mal_id) ||
-        Number(localEp?.episodeNumber) ||
-        Number(localEp?.number) ||
-        index + 1;
-
-      return {
-        episodeNumber: localNumber,
+      episodes.push({
+        episodeNumber: epNum,
         seasonNumber: wantedSeason || null,
         tmdbSeasonNumber: tmdbEp?.realSeasonNumber || null,
         tmdbEpisodeNumber: tmdbEp?.episode_number || null,
 
-        title:
-          localEp?.title ||
-          localEp?.title_japanese ||
-          tmdbEp?.name ||
-          `Episode ${index + 1}`,
-
+        title: tmdbEp?.name || `Episode ${epNum}`,
         tmdbTitle: tmdbEp?.name || null,
 
         image: tmdbEp?.still_path
           ? `${TMDB_IMAGE}${tmdbEp.still_path}`
           : null,
 
-        overview:
-          tmdbEp?.overview ||
-          localEp?.synopsis ||
-          "",
-
-        airDate:
-          tmdbEp?.air_date ||
-          localEp?.aired ||
-          null,
-      };
-    });
+        overview: tmdbEp?.overview || "",
+        airDate: tmdbEp?.air_date || null,
+      });
+    }
 
     const finalData = {
       tmdbId: bestShow.id,
@@ -743,11 +584,11 @@ async function getTmdbAnimeData(anilistId, forceRefresh = false) {
       logo: logo?.file_path ? `${TMDB_IMAGE}${logo.file_path}` : null,
 
       seasonNumber: wantedSeason || null,
-      tmdbSeasonNumber: selectedTmdbEpisodes[0]?.realSeasonNumber || null,
-      tmdbStartEpisode: selectedTmdbEpisodes[0]?.episode_number || null,
-      wantedSeason,
+      rangeStart,
+      rangeEnd,
 
-      matchScore: bestStartScore,
+      tmdbStartEpisode: episodes.find((ep) => ep.tmdbEpisodeNumber)?.tmdbEpisodeNumber || null,
+      totalReturned: episodes.length,
       episodes,
     };
 
@@ -2347,18 +2188,23 @@ app.get("/api/tmdb/:id", async (req, res) => {
     String(req.query.refresh || "").toLowerCase() === "true" ||
     String(req.query.force || "").toLowerCase() === "true";
 
+  const start = Math.max(1, Number(req.query.start || 1));
+  const end = Math.max(start, Number(req.query.end || start + 99));
+
   if (forceRefresh && supabase) {
     await supabase
       .from("search_cache")
       .delete()
-      .eq("cache_key", `tmdb-anime-${id}`);
+      .eq("cache_key", `tmdb-anime-${id}-${start}-${end}`);
   }
 
-  const data = await getTmdbAnimeData(id, forceRefresh);
+  const data = await getTmdbAnimeData(id, forceRefresh, start, end);
 
   res.json({
     status: "ok",
     forceRefresh,
+    start,
+    end,
     data,
   });
 });
