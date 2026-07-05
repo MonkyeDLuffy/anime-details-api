@@ -1,0 +1,19 @@
+{
+  "name": "anime-details-api",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.74.0",
+    "@upstash/redis": "^1.37.0",
+    "axios": "^1.16.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "lru-cache": "^11.1.0",
+    "ws": "^8.21.0"
+  }
+}
